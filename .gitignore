@@ -1,0 +1,41 @@
+# Rider project settings
+.idea/
+
+# User-specific Rider files
+*.sln.iml
+
+# Build results
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+
+# Rider caches
+.idea/.idea.*
+.idea/modules.xml
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/.idea.*.iml
+
+# VS Code (if mixed use)
+.vscode/
+
+# NuGet packages
+*.nupkg
+*.snupkg
+*.nuspec
+packages/
+*.nuget.props
+*.nuget.targets
+
+# Test results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# Publish output
+publish/
+
+# OS files
+[Dd]esktop.ini
+[Tt]humbs.db
+*.DS_Store
+
