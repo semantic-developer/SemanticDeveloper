@@ -1,16 +1,52 @@
 using System;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.IO;
 
 namespace SemanticDeveloper.Models;
 
-public class FileTreeItem
+public class FileTreeItem : INotifyPropertyChanged
 {
-    public string Name { get; set; } = string.Empty;
+    private string _name = string.Empty;
+    public string Name
+    {
+        get => _name;
+        set { if (_name == value) return; _name = value; OnPropertyChanged(); }
+    }
     public string FullPath { get; init; } = string.Empty;
     public bool IsDirectory { get; init; }
     public ObservableCollection<FileTreeItem> Children { get; } = new();
     public bool ChildrenInitialized { get; private set; }
+    private string _gitStatus = string.Empty; // "added", "modified", "deleted", ""
+    public string GitStatus
+    {
+        get => _gitStatus;
+        set
+        {
+            if (_gitStatus == value) return;
+            _gitStatus = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(GitStatusShort));
+            OnPropertyChanged(nameof(StatusBrush));
+        }
+    }
+
+    public string GitStatusShort => GitStatus switch
+    {
+        "added" => "A",
+        "modified" => "M",
+        "deleted" => "D",
+        _ => string.Empty
+    };
+
+    public string StatusBrush => GitStatus switch
+    {
+        "added" => "#66BB6A",
+        "modified" => "#FDD835",
+        "deleted" => "#EF5350",
+        _ => "#BBB"
+    };
 
     // Simple vector data for icons
     public string IconGeometry => IsDirectory
@@ -49,7 +85,7 @@ public class FileTreeItem
         return item;
     }
 
-    public void LoadChildrenIfNeeded()
+    public void LoadChildrenIfNeeded(System.Collections.Generic.IDictionary<string, string>? statusMap = null)
     {
         if (!IsDirectory || ChildrenInitialized)
             return;
@@ -75,6 +111,10 @@ public class FileTreeItem
                     IsDirectory = false,
                     ChildrenInitialized = true
                 };
+                if (statusMap != null && statusMap.TryGetValue(Normalize(file), out var status))
+                {
+                    child.GitStatus = status;
+                }
                 Children.Add(child);
             }
         }
@@ -85,4 +125,10 @@ public class FileTreeItem
 
         ChildrenInitialized = true;
     }
+
+    private static string Normalize(string p)
+        => Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }

@@ -1,21 +1,24 @@
 using System;
-using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
+using LibGit2Sharp;
+using System.Collections.Generic;
 
 namespace SemanticDeveloper.Services;
 
 public static class GitHelper
 {
     public static bool IsGitRepository(string path)
-        => Directory.Exists(Path.Combine(path, ".git"));
-
-    public static async Task<bool> IsGitAvailableAsync()
     {
         try
         {
-            var (code, _, _) = await RunProcessAsync("git", "--version", Directory.GetCurrentDirectory());
-            return code == 0;
+            var discovered = Repository.Discover(path);
+            if (string.IsNullOrEmpty(discovered)) return false;
+
+            var repoRoot = NormalizePath(Path.GetDirectoryName(discovered.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))!);
+            var candidate = NormalizePath(path);
+            return PathsEqual(repoRoot, candidate);
         }
         catch
         {
@@ -23,62 +26,269 @@ public static class GitHelper
         }
     }
 
-    public static async Task<GitInitResult> InitializeRepositoryAsync(string path)
+    public static Task<bool> IsGitAvailableAsync()
     {
         try
         {
-            var (codeInit, outInit, errInit) = await RunProcessAsync("git", "init", path);
-            if (codeInit != 0)
-                return GitInitResult.CreateFailure(errInit);
-
-            // Attempt initial commit (optional)
-            await RunProcessAsync("git", "add -A", path);
-            await RunProcessAsync("git", "commit -m \"Initial commit\"", path);
-
-            return GitInitResult.CreateSuccess(outInit);
+            // Force-load libgit2 by invoking a harmless API
+            _ = Repository.Discover(Directory.GetCurrentDirectory());
+            return Task.FromResult(true);
         }
-        catch (Exception ex)
+        catch
         {
-            return GitInitResult.CreateFailure(ex.Message);
+            // Native library not available or failed to load
+            return Task.FromResult(false is bool ? (bool)false : false);
         }
     }
 
-    private static Task<(int ExitCode, string StdOut, string StdErr)> RunProcessAsync(string fileName, string arguments, string workingDirectory)
+    public static Task<GitInitResult> InitializeRepositoryAsync(string path)
     {
-        var tcs = new TaskCompletionSource<(int, string, string)>();
-        var psi = new ProcessStartInfo
-        {
-            FileName = fileName,
-            Arguments = arguments,
-            WorkingDirectory = workingDirectory,
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        var stdout = string.Empty;
-        var stderr = string.Empty;
-        process.OutputDataReceived += (_, e) => { if (e.Data != null) stdout += e.Data + Environment.NewLine; };
-        process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr += e.Data + Environment.NewLine; };
-        process.Exited += (_, __) =>
-        {
-            tcs.TrySetResult((process.ExitCode, stdout, stderr));
-            process.Dispose();
-        };
         try
         {
-            process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
+            // Initialize repo (.git folder)
+            var repoPath = Repository.Init(path);
+
+            // Open and attempt an initial commit (best-effort)
+            using var repo = new Repository(repoPath);
+
+            // Stage everything
+            try { Commands.Stage(repo, "*"); } catch { }
+
+            // Create a signature using config or sensible fallbacks
+            var author = CreateSignature(repo);
+            try
+            {
+                // If nothing is staged, this may throw; swallow to keep behavior lenient
+                repo.Commit("Initial commit", author, author);
+            }
+            catch { }
+
+            return Task.FromResult(GitInitResult.CreateSuccess($"Initialized empty Git repository in {repo.Info.Path}"));
         }
         catch (Exception ex)
         {
-            tcs.TrySetException(ex);
+            return Task.FromResult(GitInitResult.CreateFailure(ex.Message));
         }
-        return tcs.Task;
     }
+
+    public static string? DiscoverRepositoryRoot(string path)
+    {
+        try
+        {
+            var discovered = Repository.Discover(path);
+            if (string.IsNullOrEmpty(discovered)) return null;
+            return NormalizePath(Path.GetDirectoryName(discovered.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))!);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static (bool Ok, string? Content, string? Error) TryReadTextAtHead(string filePath)
+    {
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(filePath);
+            if (string.IsNullOrEmpty(repoRoot))
+                return (false, null, "Not a git repository");
+
+            var rel = Path.GetRelativePath(repoRoot!, filePath).Replace('\\', '/');
+            using var repo = new Repository(repoRoot!);
+            var head = repo.Head?.Tip;
+            if (head == null)
+                return (false, null, "No commits in repository");
+            var entry = head[rel];
+            if (entry == null || entry.TargetType != TreeEntryTargetType.Blob)
+                return (false, null, "File not tracked in HEAD");
+            var blob = (Blob)entry.Target;
+            using var stream = blob.GetContentStream();
+            using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, true);
+            var text = reader.ReadToEnd();
+            return (true, text, null);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
+    public static (bool Ok, HashSet<int> BaseDeleted, HashSet<int> CurrentAdded, string? Error) TryGetLineDiffSets(string filePath)
+    {
+        var baseDeleted = new HashSet<int>();
+        var currentAdded = new HashSet<int>();
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(filePath);
+            if (string.IsNullOrEmpty(repoRoot))
+                return (false, baseDeleted, currentAdded, "Not a git repository");
+
+            using var repo = new Repository(repoRoot!);
+            var rel = Path.GetRelativePath(repoRoot!, filePath).Replace('\\', '/');
+            var headTree = repo.Head?.Tip?.Tree;
+            if (headTree == null)
+                return (false, baseDeleted, currentAdded, "No commits in repository");
+
+            // Compare HEAD tree to working directory for the single file (unified diff text)
+            var patch = repo.Diff.Compare<Patch>(headTree, DiffTargets.WorkingDirectory, new[] { rel });
+            var entry = patch[rel];
+            if (entry == null)
+                return (true, baseDeleted, currentAdded, null); // No changes
+
+            var diffText = entry.Patch ?? string.Empty;
+            ParseUnifiedDiffForLineSets(diffText, baseDeleted, currentAdded);
+
+            return (true, baseDeleted, currentAdded, null);
+        }
+        catch (Exception ex)
+        {
+            return (false, baseDeleted, currentAdded, ex.Message);
+        }
+    }
+
+    private static void ParseUnifiedDiffForLineSets(string diff, HashSet<int> baseDeleted, HashSet<int> currentAdded)
+    {
+        // Parse lines with hunk headers @@ -oldStart,oldCount +newStart,newCount @@
+        var lines = (diff ?? string.Empty).Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+        int oldLine = 0, newLine = 0;
+        foreach (var raw in lines)
+        {
+            var line = raw;
+            if (line.StartsWith("+++ ") || line.StartsWith("--- ")) continue;
+            if (line.StartsWith("@@"))
+            {
+                // Extract numbers
+                // Example: @@ -12,7 +12,9 @@
+                try
+                {
+                    int idxPlus = line.IndexOf('+');
+                    int idxMinus = line.IndexOf('-');
+                    int idxSecondAt = line.IndexOf("@@", 2);
+                    var minusPart = line.Substring(idxMinus + 1, (idxPlus - idxMinus) - 2).Trim();
+                    var plusPart = line.Substring(idxPlus + 1, (idxSecondAt - idxPlus) - 2).Trim();
+                    oldLine = ParseStart(minusPart);
+                    newLine = ParseStart(plusPart);
+                }
+                catch { oldLine = newLine = 0; }
+                continue;
+            }
+            if (line.StartsWith("+"))
+            {
+                if (newLine > 0) currentAdded.Add(newLine);
+                newLine++;
+                continue;
+            }
+            if (line.StartsWith("-"))
+            {
+                if (oldLine > 0) baseDeleted.Add(oldLine);
+                oldLine++;
+                continue;
+            }
+            if (line.StartsWith("\\ No newline"))
+            {
+                continue;
+            }
+            // context
+            if (oldLine > 0) oldLine++;
+            if (newLine > 0) newLine++;
+        }
+    }
+
+    private static int ParseStart(string range)
+    {
+        // range like "12,7" or "12"
+        if (string.IsNullOrEmpty(range)) return 0;
+        var idx = range.IndexOf(',');
+        var first = idx >= 0 ? range.Substring(0, idx) : range;
+        if (int.TryParse(first, out var val)) return val;
+        return 0;
+    }
+
+    // Returns a map of full normalized file paths under the provided path to a simple status string
+    // Values: "added", "modified", "deleted". Untracked files are treated as "added".
+    public static System.Collections.Generic.Dictionary<string, string> TryGetWorkingDirectoryStatus(string path)
+    {
+        var result = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(path);
+            if (string.IsNullOrEmpty(repoRoot)) return result;
+
+            using var repo = new Repository(repoRoot!);
+            var status = repo.RetrieveStatus(new StatusOptions
+            {
+                IncludeUntracked = true,
+                RecurseIgnoredDirs = false,
+                RecurseUntrackedDirs = true
+            });
+
+            var rootNorm = NormalizePath(path);
+            foreach (var entry in status)
+            {
+                // Build full path and filter to selected subtree
+                var full = NormalizePath(Path.Combine(repoRoot!, entry.FilePath.Replace('/', Path.DirectorySeparatorChar)));
+                if (!full.StartsWith(rootNorm, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    continue;
+
+                var kind = MapStatusToKind(entry.State);
+                if (kind is null) continue;
+                result[full] = kind;
+            }
+        }
+        catch
+        {
+            // ignore, return partial/empty map
+        }
+        return result;
+    }
+
+    private static string? MapStatusToKind(FileStatus state)
+    {
+        if (state.HasFlag(FileStatus.NewInWorkdir) || state.HasFlag(FileStatus.NewInIndex)) return "added";
+        if (state.HasFlag(FileStatus.ModifiedInWorkdir) || state.HasFlag(FileStatus.ModifiedInIndex)) return "modified";
+        if (state.HasFlag(FileStatus.DeletedFromWorkdir) || state.HasFlag(FileStatus.DeletedFromIndex)) return "deleted";
+        if (state.HasFlag(FileStatus.RenamedInWorkdir) || state.HasFlag(FileStatus.RenamedInIndex)) return "modified";
+        if (state.HasFlag(FileStatus.TypeChangeInWorkdir) || state.HasFlag(FileStatus.TypeChangeInIndex)) return "modified";
+        return null;
+    }
+
+    public static (bool Ok, string Status) TryGetStatusForFile(string filePath)
+    {
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(filePath);
+            if (string.IsNullOrEmpty(repoRoot)) return (false, string.Empty);
+            using var repo = new Repository(repoRoot!);
+            var rel = Path.GetRelativePath(repoRoot!, filePath).Replace('\\', '/');
+            var st = repo.RetrieveStatus(rel);
+            var kind = MapStatusToKind(st) ?? string.Empty;
+            return (true, kind);
+        }
+        catch
+        {
+            return (false, string.Empty);
+        }
+    }
+
+    private static Signature CreateSignature(Repository repo)
+    {
+        string? name = null;
+        string? email = null;
+        try { name = repo.Config.Get<string>("user.name")?.Value; } catch { }
+        try { email = repo.Config.Get<string>("user.email")?.Value; } catch { }
+
+        if (string.IsNullOrWhiteSpace(name)) name = Environment.UserName ?? "User";
+        if (string.IsNullOrWhiteSpace(email)) email = $"{name}@local";
+        return new Signature(name, email, DateTimeOffset.Now);
+    }
+
+    private static string NormalizePath(string p)
+        => Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+    private static bool PathsEqual(string a, string b)
+        => OperatingSystem.IsWindows()
+            ? string.Equals(a, b, StringComparison.OrdinalIgnoreCase)
+            : string.Equals(a, b, StringComparison.Ordinal);
 }
 
 public record GitInitResult(bool Success, string Output, string Error)
