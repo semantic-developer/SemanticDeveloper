@@ -6,6 +6,8 @@
         <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
         <ApplicationManifest>app.manifest</ApplicationManifest>
         <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+        <Version>1.0.1</Version>
+        <Copyright>2025 Stainless Designer LLC</Copyright>
     </PropertyGroup>
 
     <ItemGroup>
@@ -25,5 +27,14 @@
 
     <ItemGroup>
       <Folder Include="Images\" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Remove="Images\semantic-developer-logo.png" />
+      <AvaloniaResource Include="Images\semantic-developer-logo.png" />
+      <None Remove="Images\semantic-developer-logo-large.png" />
+      <AvaloniaResource Include="Images\semantic-developer-logo-large.png" />
+      <None Remove="Images\SemanticDeveloperLogo.ico" />
+      <AvaloniaResource Include="Images\SemanticDeveloperLogo.ico" />
     </ItemGroup>
 </Project>

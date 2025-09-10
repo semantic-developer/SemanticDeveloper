@@ -4,7 +4,8 @@
         Width="420" Height="180"
         CanResize="False"
         WindowStartupLocation="CenterOwner"
-        Title="Confirm">
+        Title="Confirm"
+        Icon="avares://SemanticDeveloper/Images/semantic-developer-logo-large.png">
     <Grid RowDefinitions="*,Auto" Margin="16">
         <TextBlock x:Name="MessageText" TextWrapping="Wrap"/>
 

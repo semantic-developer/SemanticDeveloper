@@ -1,0 +1,74 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="400" d:DesignHeight="250"
+        x:Class="SemanticDeveloper.Views.AboutDialog"
+        Width="400" 
+        Height="385"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False"
+        SystemDecorations="Full"
+        ExtendClientAreaToDecorationsHint="False"
+        ShowInTaskbar="False"
+        BorderThickness="1"
+        BorderBrush="#555555"
+        Title="About Semantic Developer"
+        Background="#2E2E2E"
+        Icon="avares://SemanticDeveloper/Images/semantic-developer-logo-large.png">
+    
+    <StackPanel Margin="20">
+        <!-- Logo Image -->
+        <Image Source="avares://SemanticDeveloper/Images/semantic-developer-logo-large.png"
+               Width="100"
+               Height="100"
+               Margin="0,0,0,8"
+               HorizontalAlignment="Center"/>
+        
+        <TextBlock Text="SemanticDeveloper" 
+                  FontSize="24" 
+                  FontWeight="Bold"
+                  HorizontalAlignment="Center"
+                  Margin="0,0,0,15" />
+        
+        <TextBlock Text="A modern AI development environment" 
+                  HorizontalAlignment="Center"
+                  Margin="0,0,0,20" />
+        
+        <StackPanel Orientation="Horizontal" 
+                   HorizontalAlignment="Center" 
+                   Margin="0,0,0,10">
+            <TextBlock Text="Version: " FontWeight="Bold" />
+            <TextBlock x:Name="VersionText" Text="1.0.0" />
+        </StackPanel>
+        
+        <TextBlock Name="WebsiteLink" 
+                  Text="Visit the project on GitHub"
+                  Foreground="LightGray"
+                  TextDecorations="Underline"
+                  Cursor="Hand"
+                  PointerPressed="WebsiteLink_Click"
+                  HorizontalAlignment="Center" 
+                  Margin="0,10,0,10" />
+        
+        <TextBlock Text="Created by John Abbott © Stainless Designer LLC"
+                  HorizontalAlignment="Center"
+                  Margin="0,0,0,10" />
+        
+        <TextBlock Name="BuiltOn" 
+                   Text="Built for cross platform use with Avalonia UI"
+                   Foreground="LightGray"
+                   TextDecorations="Underline"
+                   Cursor="Hand"
+                   PointerPressed="BuiltOnLink_Click"
+                   HorizontalAlignment="Center" 
+                   Margin="0,10,0,10" />
+        
+        <Button Content="Close" 
+               HorizontalAlignment="Center" 
+               HorizontalContentAlignment="Center"
+               VerticalContentAlignment="Center"
+               Width="100"
+               Click="CloseButton_Click" />
+    </StackPanel>
+</Window>

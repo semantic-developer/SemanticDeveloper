@@ -51,6 +51,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string _selectedFileName = string.Empty;
     private bool _isCompareMode;
     private System.Collections.Generic.Dictionary<string, string>? _gitStatusMap;
+    private bool _isGitRepo;
+    private string _currentBranch = string.Empty;
+    private bool _canInitGit;
 
     // Editor documents
     public TextDocument CurrentFileDocument { get; } = new TextDocument();
@@ -156,6 +159,39 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             if (_selectedFileName == value) return;
             _selectedFileName = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public bool IsGitRepo
+    {
+        get => _isGitRepo;
+        set
+        {
+            if (_isGitRepo == value) return;
+            _isGitRepo = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public string CurrentBranch
+    {
+        get => _currentBranch;
+        set
+        {
+            if (_currentBranch == value) return;
+            _currentBranch = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public bool CanInitGit
+    {
+        get => _canInitGit;
+        set
+        {
+            if (_canInitGit == value) return;
+            _canInitGit = value;
             OnPropertyChanged();
         }
     }
@@ -675,6 +711,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
         }
 
+        RefreshGitUi();
         await RestartCliAsync();
     }
 
@@ -700,6 +737,33 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         if (Dispatcher.UIThread.CheckAccess()) DoLoad();
         else Dispatcher.UIThread.Post(DoLoad);
+    }
+
+    private void RefreshGitUi()
+    {
+        try
+        {
+            string? repoRoot = null;
+            if (HasWorkspace && CurrentWorkspacePath is not null)
+                repoRoot = GitHelper.DiscoverRepositoryRoot(CurrentWorkspacePath);
+            IsGitRepo = !string.IsNullOrEmpty(repoRoot);
+            if (IsGitRepo && CurrentWorkspacePath is not null)
+            {
+                var (ok, branch, _) = GitHelper.TryGetCurrentBranch(CurrentWorkspacePath);
+                CurrentBranch = ok && !string.IsNullOrWhiteSpace(branch) ? branch! : string.Empty;
+            }
+            else
+            {
+                CurrentBranch = string.Empty;
+            }
+            CanInitGit = HasWorkspace && !IsGitRepo;
+        }
+        catch
+        {
+            IsGitRepo = false;
+            CurrentBranch = string.Empty;
+            CanInitGit = HasWorkspace;
+        }
     }
 
     private void OnTreeItemExpanded(object? sender, RoutedEventArgs e)
@@ -1162,6 +1226,118 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             e.Handled = true;
             await SendCliInputAsync();
         }
+    }
+
+    private async void OnOpenAboutClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var dialog = new Views.AboutDialog();
+        await dialog.ShowDialog(this);
+    }
+
+    private async void OnGitCommitClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (!HasWorkspace || CurrentWorkspacePath is null || !IsGitRepo) return;
+        var dlg = new Views.InputDialog
+        {
+            Title = "Commit Changes"
+        };
+        dlg.Prompt = "Commit message:";
+        dlg.Input = string.Empty;
+        var message = await dlg.ShowDialog<string?>(this);
+        if (message is null) return;
+        var (ok, output, error) = GitHelper.TryCommitAll(CurrentWorkspacePath, message);
+        if (ok)
+        {
+            AppendCliLog(output ?? "Committed.");
+            LoadTree(CurrentWorkspacePath);
+        }
+        else
+        {
+            AppendCliLog("Git commit failed: " + (error ?? "unknown error"));
+        }
+    }
+
+    private async void OnGitNewBranchClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (!HasWorkspace || CurrentWorkspacePath is null || !IsGitRepo) return;
+        var dlg = new Views.InputDialog
+        {
+            Title = "Create New Branch"
+        };
+        dlg.Prompt = "Branch name:";
+        dlg.Input = string.Empty;
+        var name = await dlg.ShowDialog<string?>(this);
+        if (name is null) return;
+        // Create branch based on default branch (main/master) and fetch origin first
+        var (ok, output, error) = GitHelper.TryCreateAndCheckoutBranch(CurrentWorkspacePath, name, baseOnDefaultBranch: true, fetchOriginFirst: true);
+        if (ok)
+        {
+            AppendCliLog(output ?? $"Checked out '{name}'.");
+            RefreshGitUi();
+            LoadTree(CurrentWorkspacePath);
+        }
+        else
+        {
+            AppendCliLog("Git branch failed: " + (error ?? "unknown error"));
+        }
+    }
+
+    private void OnGitRefreshClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        RefreshGitUi();
+        if (HasWorkspace && CurrentWorkspacePath is not null)
+            LoadTree(CurrentWorkspacePath);
+    }
+
+    private async void OnGitSwitchBranchClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (!HasWorkspace || CurrentWorkspacePath is null || !IsGitRepo) return;
+        var dlg = new Views.InputDialog { Title = "Switch Branch" };
+        dlg.Prompt = "Branch name:";
+        dlg.Input = CurrentBranch;
+        var name = await dlg.ShowDialog<string?>(this);
+        if (string.IsNullOrWhiteSpace(name)) return;
+        var (ok, output, error) = GitHelper.TryCheckoutBranch(CurrentWorkspacePath, name);
+        if (ok)
+        {
+            AppendCliLog(output ?? $"Checked out '{name}'.");
+            RefreshGitUi();
+            LoadTree(CurrentWorkspacePath);
+        }
+        else
+        {
+            AppendCliLog("Git checkout failed: " + (error ?? "unknown error"));
+        }
+    }
+
+    private async void OnGitInitClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (!HasWorkspace || CurrentWorkspacePath is null) return;
+        var available = await GitHelper.IsGitAvailableAsync();
+        if (!available)
+        {
+            AppendCliLog("Git library unavailable. Cannot initialize repository.");
+            return;
+        }
+        var confirm = new Views.ConfirmDialog
+        {
+            Title = "Initialize Git",
+            Message = "Initialize a new Git repository in this folder?"
+        };
+        var ok = await confirm.ShowDialog<bool>(this);
+        if (!ok) return;
+        AppendCliLog($"Initializing git in {CurrentWorkspacePath}…");
+        var result = await GitHelper.InitializeRepositoryAsync(CurrentWorkspacePath);
+        if (result.Success)
+        {
+            AppendCliLog(result.Output.Trim());
+        }
+        else
+        {
+            AppendCliLog("Git init failed: " + result.Error.Trim());
+        }
+        RefreshGitUi();
+        LoadTree(CurrentWorkspacePath);
     }
 
     private async Task SendCliInputAsync()

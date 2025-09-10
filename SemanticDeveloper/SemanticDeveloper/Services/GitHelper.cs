@@ -85,6 +85,135 @@ public static class GitHelper
         }
     }
 
+    public static (bool Ok, string? Branch, string? Error) TryGetCurrentBranch(string path)
+    {
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(path);
+            if (string.IsNullOrEmpty(repoRoot)) return (false, null, "Not a git repository");
+            using var repo = new Repository(repoRoot!);
+            var head = repo.Head;
+            var name = head?.FriendlyName;
+            if (string.IsNullOrWhiteSpace(name)) return (false, null, "No HEAD");
+            return (true, name, null);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
+    public static (bool Ok, string? Output, string? Error) TryCommitAll(string path, string message)
+    {
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(path);
+            if (string.IsNullOrEmpty(repoRoot)) return (false, null, "Not a git repository");
+            using var repo = new Repository(repoRoot!);
+            // Stage everything
+            Commands.Stage(repo, "*");
+            var author = CreateSignature(repo);
+            // If nothing to commit, LibGit2Sharp throws; catch and return friendly
+            try
+            {
+                var commit = repo.Commit(string.IsNullOrWhiteSpace(message) ? "Update" : message, author, author);
+                return (true, $"Committed {commit.Sha[..7]}: {commit.MessageShort}", null);
+            }
+            catch (EmptyCommitException)
+            {
+                return (false, null, "No changes to commit.");
+            }
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
+    public static (bool Ok, string? Output, string? Error) TryCreateAndCheckoutBranch(string path, string branchName)
+        => TryCreateAndCheckoutBranch(path, branchName, baseOnDefaultBranch: false, fetchOriginFirst: false);
+
+    public static (bool Ok, string? Output, string? Error) TryCreateAndCheckoutBranch(string path, string branchName, bool baseOnDefaultBranch, bool fetchOriginFirst)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(branchName)) return (false, null, "Invalid branch name");
+            var repoRoot = DiscoverRepositoryRoot(path);
+            if (string.IsNullOrEmpty(repoRoot)) return (false, null, "Not a git repository");
+            using var repo = new Repository(repoRoot!);
+
+            // If exists, just checkout
+            var existing = repo.Branches.FirstOrDefault(b => string.Equals(b.FriendlyName, branchName, StringComparison.Ordinal));
+            if (existing is not null)
+            {
+                Commands.Checkout(repo, existing);
+                return (true, $"Checked out '{existing.FriendlyName}'", null);
+            }
+
+            Branch? baseBranch = null;
+            Commit? baseCommit = null;
+
+            if (fetchOriginFirst)
+            {
+                try
+                {
+                    var origin = repo.Network.Remotes["origin"];
+                    if (origin is not null)
+                    {
+                        var refSpecs = origin.FetchRefSpecs.Select(x => x.Specification).ToList();
+                        Commands.Fetch(repo, origin.Name, refSpecs, new FetchOptions(), null);
+                    }
+                }
+                catch { }
+            }
+
+            if (baseOnDefaultBranch)
+            {
+                // Prefer remote default branches origin/main or origin/master, then local main/master, else current HEAD
+                baseBranch = repo.Branches.FirstOrDefault(b => b.FriendlyName == "origin/main")
+                             ?? repo.Branches.FirstOrDefault(b => b.FriendlyName == "origin/master")
+                             ?? repo.Branches.FirstOrDefault(b => b.FriendlyName == "main")
+                             ?? repo.Branches.FirstOrDefault(b => b.FriendlyName == "master");
+                baseCommit = baseBranch?.Tip ?? repo.Head?.Tip;
+            }
+            else
+            {
+                baseCommit = repo.Head?.Tip;
+            }
+
+            if (baseCommit is null)
+                return (false, null, "Repository has no commits to base from.");
+
+            var created = repo.CreateBranch(branchName, baseCommit);
+            Commands.Checkout(repo, created);
+            var basedOn = baseBranch?.FriendlyName ?? "HEAD";
+            return (true, $"Created and checked out '{created.FriendlyName}' (based on {basedOn}).", null);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
+    public static (bool Ok, string? Output, string? Error) TryCheckoutBranch(string path, string branchName)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(branchName)) return (false, null, "Invalid branch name");
+            var repoRoot = DiscoverRepositoryRoot(path);
+            if (string.IsNullOrEmpty(repoRoot)) return (false, null, "Not a git repository");
+            using var repo = new Repository(repoRoot!);
+            var branch = repo.Branches.FirstOrDefault(b => string.Equals(b.FriendlyName, branchName, StringComparison.Ordinal));
+            if (branch is null) return (false, null, $"Branch '{branchName}' not found.");
+            Commands.Checkout(repo, branch);
+            return (true, $"Checked out '{branch.FriendlyName}'", null);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
     public static (bool Ok, string? Content, string? Error) TryReadTextAtHead(string filePath)
     {
         try
