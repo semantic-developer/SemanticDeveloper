@@ -1,0 +1,28 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="SemanticDeveloper.Views.CliSettingsDialog"
+        Width="520" Height="200"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        x:CompileBindings="False"
+        Title="CLI Settings">
+    <Grid RowDefinitions="*,Auto" Margin="16" RowSpacing="12">
+        <StackPanel Spacing="10">
+            <StackPanel>
+                <TextBlock Text="Command" Margin="0,0,0,4"/>
+                <TextBox Text="{Binding Command, Mode=TwoWay}"/>
+            </StackPanel>
+            <StackPanel>
+                <TextBlock Text="Additional Arguments" Margin="0,0,0,4"/>
+                <TextBox Text="{Binding AdditionalArgs, Mode=TwoWay}"/>
+                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Example: -c model=gpt-5-high"/>
+            </StackPanel>
+            <CheckBox Content="Auto-approve tool/patch requests" IsChecked="{Binding AutoApproveEnabled, Mode=TwoWay}"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Width="96" Click="OnCancel">Cancel</Button>
+            <Button Width="96" Click="OnSave">Save</Button>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -2,8 +2,90 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        xmlns:local="clr-namespace:SemanticDeveloper"
+        xmlns:models="clr-namespace:SemanticDeveloper.Models"
+        xmlns:ae="clr-namespace:AvaloniaEdit;assembly=AvaloniaEdit"
+        mc:Ignorable="d" d:DesignWidth="1100" d:DesignHeight="720"
         x:Class="SemanticDeveloper.MainWindow"
-        Title="SemanticDeveloper">
-    Welcome to Avalonia!
+        x:CompileBindings="False"
+        Title="Semantic Developer"
+        WindowState="Maximized">
+    <Grid RowDefinitions="Auto,*" ColumnDefinitions="*">
+        <!-- Top toolbar -->
+        <Border Background="#2B2B2B" Padding="12">
+            <Grid ColumnDefinitions="Auto,12,*,Auto,8,Auto">
+                <Button x:Name="SelectWorkspaceButton" Foreground="#E6E6E6" Click="OnSelectWorkspaceClick">Select Workspace…</Button>
+                <Border Grid.Column="1"/>
+                <TextBlock Grid.Column="2" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Foreground="#E6E6E6">
+                    <Run Text="Workspace: "/>
+                    <Run Text="{Binding CurrentWorkspacePath}"/>
+                </TextBlock>
+                <Button Grid.Column="3" x:Name="OpenInFileManagerButton" Foreground="#E6E6E6" Click="OnOpenInFileManagerClick" IsEnabled="{Binding HasWorkspace}">Open in File Manager</Button>
+                <Border Grid.Column="4"/>
+                <Button Grid.Column="5" x:Name="OpenCliSettingsButton" Foreground="#E6E6E6" Click="OnOpenCliSettingsClick">CLI Settings</Button>
+            </Grid>
+        </Border>
+
+        <!-- Body split: left file tree, right CLI output -->
+        <Grid Grid.Row="1" ColumnDefinitions="320,Auto,*">
+            <!-- Left: directory tree -->
+            <Border BorderBrush="#333" BorderThickness="0,0,1,0" Background="#1F1F1F">
+                <Grid RowDefinitions="Auto,*">
+                    <TextBlock Margin="10,8" FontWeight="SemiBold" Text="Workspace Files" Foreground="#E6E6E6"/>
+                    <TreeView Grid.Row="1" ItemsSource="{Binding TreeRoots}">
+                        <TreeView.DataTemplates>
+                            <TreeDataTemplate DataType="models:FileTreeItem" ItemsSource="{Binding Children}">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <Path Width="14" Height="14"
+                                          Data="{Binding IconGeometry}"
+                                          Fill="#BBB"/>
+                                    <TextBlock Text="{Binding Name}" Foreground="#E6E6E6"/>
+                                </StackPanel>
+                            </TreeDataTemplate>
+                        </TreeView.DataTemplates>
+                    </TreeView>
+                </Grid>
+            </Border>
+            <!-- Splitter -->
+            <GridSplitter Grid.Column="1" Width="5" Background="#2A2A2A" HorizontalAlignment="Stretch"
+                          ResizeDirection="Columns" ShowsPreview="True"/>
+
+            <!-- Right: CLI session area -->
+            <Grid Grid.Column="2" RowDefinitions="Auto,*,Auto">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Top" Margin="10" Spacing="8">
+                    <TextBlock FontWeight="SemiBold" Text="Codex CLI Session"/>
+                    <TextBlock Text="—"/>
+                    <TextBlock Text="{Binding SessionStatus}"/>
+                    <ProgressBar Width="60" Height="6" IsIndeterminate="True" IsVisible="{Binding IsBusy}" Margin="8,0,0,0" Opacity="0.35"/>
+                    <TextBlock Text="•" Margin="8,0,0,0"/>
+                    <TextBlock Text="{Binding TokenStats}"/>
+                </StackPanel>
+
+                <Border Grid.Row="1" Margin="10" BorderBrush="#DDD" BorderThickness="1" CornerRadius="4">
+                    <ae:TextEditor x:Name="LogEditor"
+                        Document="{Binding CliLogDocument, Mode=OneWay}"
+                        IsReadOnly="True"
+                        WordWrap="True"
+                        ShowLineNumbers="False"
+                        Background="#0A0A0A"
+                        Foreground="#E6E6E6"
+                        FontFamily="Consolas, Menlo, monospace"
+                        FontSize="13" />
+                </Border>
+
+                <StackPanel Grid.Row="2" Orientation="Vertical" Margin="10" Spacing="8">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="RestartCliButton" Click="OnRestartCliClick" IsEnabled="{Binding HasWorkspace}">Restart Session</Button>
+                        <Button x:Name="StopCliButton" Click="OnStopCliClick" IsEnabled="{Binding IsCliRunning}">Stop</Button>
+                        <Button x:Name="ClearLogButton" Click="OnClearLogClick">Clear Log</Button>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBox HorizontalAlignment="Stretch" MinWidth="200" Watermark="Type input and press Enter"
+                                 Text="{Binding CliInput, Mode=TwoWay}" KeyDown="OnCliInputKeyDown"/>
+                        <Button x:Name="SendCliInputButton" Click="OnSendCliInputClick" IsEnabled="{Binding IsCliRunning}">Send</Button>
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </Grid>
 </Window>
