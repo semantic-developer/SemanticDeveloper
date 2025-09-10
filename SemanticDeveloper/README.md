@@ -29,6 +29,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
 
 1. Open the app, click “Select Workspace…” and choose a folder.
    - If it isn’t a git repo and the Git library is available, you’ll be prompted to initialize one.
+   - You can also initialize later from the header via “Initialize Git…”.
 2. Click “Restart Session” to launch `codex proto` in the workspace directory (a session also starts automatically after you select a workspace).
 3. Type into the input box and press Enter to send. Output appears in the right panel.
 4. “CLI Settings” lets you change:
@@ -43,6 +44,40 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
    - A soft indeterminate progress bar while busy.
    - Token stats (when available): `tokens <blended-total> • <percent> left`.
      The percent remaining is an estimate based on the model’s context window and may differ slightly from the server’s internal view.
+   - When inside a Git repository: current branch and a small Git menu for quick actions.
+
+## Git Integration
+
+The app integrates basic Git operations directly in the header. All actions use LibGit2Sharp (embedded libgit2); the system `git` command is not required.
+
+- Branch indicator
+  - Shows the current branch (e.g., `main`) after the workspace path when the selected folder is inside a Git repo.
+
+- Git menu (Git ▾)
+  - Commit…
+    - Stages all changes (`*`) and creates a commit with the provided message.
+    - Uses your Git config for name/email if available; otherwise falls back to a local signature like `<user>@local`.
+    - If there are no changes, you’ll get a friendly “No changes to commit.” notice.
+  - New Branch…
+    - Creates and checks out a new branch based on the default branch when available.
+    - Behavior details:
+      - Performs a best‑effort `fetch` from `origin` first (no merge/rebase into your working copy).
+      - Bases the new branch on, in order of preference: `origin/main`, `origin/master`, local `main`, local `master`, then current `HEAD`.
+      - Example log: `Created and checked out 'feature-x' (based on origin/main).`
+  - Switch Branch…
+    - Checks out an existing branch by name (no automatic fetch/merge).
+  - Refresh
+    - Refreshes the branch label and the file tree’s Git status coloring.
+
+- Initialize Git…
+  - When the workspace is not a Git repo, an “Initialize Git…” button appears in the header.
+  - Initializes a repository in the selected folder, stages files, and attempts an initial commit (best‑effort).
+  - This is the same capability offered right after selecting a non‑repo folder.
+
+Notes
+- Operations are local and safe: no network is used except the optional `fetch` for “New Branch…”.
+- Pull/push are not exposed in the UI. If desired, they can be added later.
+- On some Linux distros, libgit2 may require additional native dependencies. If the Git library can’t load, the UI will hide Git actions and log a helpful message.
 
 ## Conversation & Protocol Behavior
 

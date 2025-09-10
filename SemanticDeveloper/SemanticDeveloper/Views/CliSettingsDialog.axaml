@@ -5,7 +5,8 @@
         CanResize="False"
         WindowStartupLocation="CenterOwner"
         x:CompileBindings="False"
-        Title="CLI Settings">
+        Title="CLI Settings"
+        Icon="avares://SemanticDeveloper/Images/semantic-developer-logo-large.png">
     <Grid RowDefinitions="*,Auto" Margin="16" RowSpacing="12">
         <StackPanel Spacing="10">
             <StackPanel>
