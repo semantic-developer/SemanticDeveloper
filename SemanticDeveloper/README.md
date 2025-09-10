@@ -16,7 +16,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
 - .NET SDK 8.0+
 - Codex CLI installed and on `PATH`
   - Verify with: `codex proto --help`
-- Optional: Git (for repo initialization)
+- No external Git required — uses LibGit2Sharp for repo init/staging/commit
 
 ## Build & Run
 
@@ -28,7 +28,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
 ## Usage
 
 1. Open the app, click “Select Workspace…” and choose a folder.
-   - If it isn’t a git repo and git is available, you’ll be prompted to initialize one.
+   - If it isn’t a git repo and the Git library is available, you’ll be prompted to initialize one.
 2. Click “Restart Session” to launch `codex proto` in the workspace directory (a session also starts automatically after you select a workspace).
 3. Type into the input box and press Enter to send. Output appears in the right panel.
 4. “CLI Settings” lets you change:
@@ -77,7 +77,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
 - “Failed to start 'codex'”: Ensure the CLI is installed and on `PATH`. Test with `codex --help` and `codex proto --help`.
 - Model selection: Provide a model via `Additional Arguments`, e.g., `--model=gpt-5-high`.
   - If you pass a `-low`, `-medium`, or `-high` suffix (e.g., `gpt-5-high`), the app normalizes it to `model=gpt-5` + `effort=high` in the submission payload.
-- Git init issues: Configure git user name/email or skip initialization.
+- Git init issues: The app uses LibGit2Sharp (no Git CLI needed). If the native lib fails to load, the app skips initialization. Commits use your configured name/email if available; otherwise a fallback signature is used.
 
 ## Project Layout
 

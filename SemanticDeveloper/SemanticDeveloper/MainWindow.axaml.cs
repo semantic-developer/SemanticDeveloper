@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Globalization;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -24,6 +25,7 @@ using TextMateSharp.Registry;
 using SemanticDeveloper.Models;
 using SemanticDeveloper.Services;
 using SemanticDeveloper.Views;
+using AvaloniaEdit; 
 
 namespace SemanticDeveloper;
 
@@ -45,6 +47,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _assistantStreaming;
     private string? _pendingUserInput;
     private string _tokenStats = string.Empty;
+    private string? _selectedFilePath;
+    private string _selectedFileName = string.Empty;
+    private bool _isCompareMode;
+    private System.Collections.Generic.Dictionary<string, string>? _gitStatusMap;
+
+    // Editor documents
+    public TextDocument CurrentFileDocument { get; } = new TextDocument();
+    public TextDocument BaseFileDocument { get; } = new TextDocument();
+    private DiffGutterRenderer? _baseDiffRenderer;
+    private DiffGutterRenderer? _currentDiffRenderer;
+    private TextEditor? _editorBase;
+    private TextEditor? _editorCurrent;
+    private TextEditor? _editorCurrent2;
+    private RegistryOptions? _editorRegistryOptions;
+    private bool _suppressScrollSync;
+    private bool _scrollHandlersAttached;
+    private const double EditorButtonsMinWidth = 420.0;
 
     public MainWindow()
     {
@@ -83,6 +102,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // Lazy-load file tree nodes when expanded
         AddHandler(TreeViewItem.ExpandedEvent, OnTreeItemExpanded, RoutingStrategies.Bubble);
+
+        // Ensure editor panel visibility default
+        try { RefreshEditorPanelsVisibility(); } catch { }
+
+        // Capture editor controls and attach gutters/highlighting support
+        TrySetupEditors();
     }
 
     public new event PropertyChangedEventHandler? PropertyChanged;
@@ -121,6 +146,31 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (_tokenStats == value) return;
             _tokenStats = value;
             OnPropertyChanged();
+        }
+    }
+
+    public string SelectedFileName
+    {
+        get => _selectedFileName;
+        set
+        {
+            if (_selectedFileName == value) return;
+            _selectedFileName = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public bool IsCompareMode
+    {
+        get => _isCompareMode;
+        set
+        {
+            if (_isCompareMode == value) return;
+            _isCompareMode = value;
+            OnPropertyChanged();
+            RefreshEditorPanelsVisibility();
+            _ = RefreshBaseDocumentAsync();
+            TrySetupEditors();
         }
     }
 
@@ -599,7 +649,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             bool gitAvailable = await GitHelper.IsGitAvailableAsync();
             if (!gitAvailable)
             {
-                AppendCliLog("Git not found on PATH. Skipping repository initialization.");
+                AppendCliLog("Git library unavailable. Skipping repository initialization.");
             }
             else
             {
@@ -635,6 +685,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             TreeRoots.Clear();
             try
             {
+                // Build git status cache
+                try { _gitStatusMap = Services.GitHelper.TryGetWorkingDirectoryStatus(rootPath); } catch { _gitStatusMap = null; }
                 var root = FileTreeItem.CreateLazy(rootPath);
                 // Show icon only for the root node
                 root.Name = string.Empty;
@@ -654,8 +706,346 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (e.Source is TreeViewItem tvi && tvi.DataContext is FileTreeItem item)
         {
-            item.LoadChildrenIfNeeded();
+            item.LoadChildrenIfNeeded(_gitStatusMap);
         }
+    }
+
+    private async void OnTreeSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        try
+        {
+            if (sender is TreeView tv && tv.SelectedItem is FileTreeItem item && !item.IsDirectory)
+            {
+                _selectedFileItem = item;
+                await LoadSelectedFileAsync(item.FullPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendCliLog("System: Failed to load file: " + ex.Message);
+        }
+    }
+
+    private async Task LoadSelectedFileAsync(string path)
+    {
+        _selectedFilePath = path;
+        SelectedFileName = Path.GetFileName(path);
+        try
+        {
+            string text = string.Empty;
+            using (var fs = File.OpenRead(path))
+            using (var sr = new StreamReader(fs, Encoding.UTF8, true))
+            {
+                text = await sr.ReadToEndAsync();
+            }
+            if (Dispatcher.UIThread.CheckAccess())
+                CurrentFileDocument.Text = text;
+            else
+                Dispatcher.UIThread.Post(() => CurrentFileDocument.Text = text);
+        }
+        catch (Exception ex)
+        {
+            if (Dispatcher.UIThread.CheckAccess())
+                CurrentFileDocument.Text = $"Failed to read file: {ex.Message}";
+            else
+                Dispatcher.UIThread.Post(() => CurrentFileDocument.Text = $"Failed to read file: {ex.Message}");
+        }
+
+        // Apply syntax highlighting by file type
+        TryApplySyntaxHighlightingForPath(_selectedFilePath);
+        await RefreshBaseDocumentAsync();
+    }
+
+    private async Task RefreshBaseDocumentAsync()
+    {
+        if (!IsCompareMode)
+        {
+            // Clear base doc when not comparing
+            if (Dispatcher.UIThread.CheckAccess())
+                BaseFileDocument.Text = string.Empty;
+            else
+                Dispatcher.UIThread.Post(() => BaseFileDocument.Text = string.Empty);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_selectedFilePath))
+        {
+            if (Dispatcher.UIThread.CheckAccess())
+                BaseFileDocument.Text = string.Empty;
+            else
+                Dispatcher.UIThread.Post(() => BaseFileDocument.Text = string.Empty);
+            return;
+        }
+
+        await Task.Run(() =>
+        {
+            try
+            {
+                var (ok, content, error) = Services.GitHelper.TryReadTextAtHead(_selectedFilePath!);
+                var text = ok ? (content ?? string.Empty) : $"No HEAD version available: {error}";
+                if (Dispatcher.UIThread.CheckAccess()) BaseFileDocument.Text = text;
+                else Dispatcher.UIThread.Post(() => BaseFileDocument.Text = text);
+
+                // Compute diff sets for gutters
+                var (dok, baseDeleted, currentAdded, derr) = Services.GitHelper.TryGetLineDiffSets(_selectedFilePath!);
+                if (_baseDiffRenderer != null)
+                {
+                    _baseDiffRenderer.Update(null, dok ? baseDeleted : new System.Collections.Generic.HashSet<int>());
+                }
+                if (_currentDiffRenderer != null)
+                {
+                    _currentDiffRenderer.Update(dok ? currentAdded : new System.Collections.Generic.HashSet<int>(), null);
+                }
+                Dispatcher.UIThread.Post(() =>
+                {
+                    _editorBase?.TextArea.TextView.InvalidateLayer(KnownLayer.Background);
+                    _editorCurrent2?.TextArea.TextView.InvalidateLayer(KnownLayer.Background);
+                });
+            }
+            catch (Exception ex)
+            {
+                if (Dispatcher.UIThread.CheckAccess()) BaseFileDocument.Text = $"Failed to read from git: {ex.Message}";
+                else Dispatcher.UIThread.Post(() => BaseFileDocument.Text = $"Failed to read from git: {ex.Message}");
+            }
+        });
+    }
+
+    private void RefreshEditorPanelsVisibility()
+    {
+        try
+        {
+            var single = this.FindControl<Control>("EditorSinglePanel");
+            var compare = this.FindControl<Control>("EditorComparePanel");
+            if (single != null) single.IsVisible = !IsCompareMode;
+            if (compare != null) compare.IsVisible = IsCompareMode;
+        }
+        catch { }
+    }
+
+    private void OnEditorViewCurrentClick(object? sender, RoutedEventArgs e)
+    {
+        IsCompareMode = false;
+    }
+
+    private void OnEditorViewCompareClick(object? sender, RoutedEventArgs e)
+    {
+        IsCompareMode = true;
+    }
+
+    private FileTreeItem? _selectedFileItem;
+
+    private async void OnSaveCurrentFileClick(object? sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_selectedFilePath))
+        {
+            AppendCliLog("System: No file selected to save.");
+            return;
+        }
+        try
+        {
+            var text = CurrentFileDocument.Text ?? string.Empty;
+            using (var fs = new FileStream(_selectedFilePath!, FileMode.Create, FileAccess.Write, FileShare.Read))
+            using (var sw = new StreamWriter(fs, Encoding.UTF8))
+            {
+                await sw.WriteAsync(text);
+            }
+            AppendCliLog($"System: Saved '{_selectedFilePath}'.");
+
+            // Refresh diff sets and base doc if compare is on
+            await RefreshBaseDocumentAsync();
+
+            // Update git status for the saved file only (avoid repo-wide status scan)
+            try
+            {
+                var (ok, status) = Services.GitHelper.TryGetStatusForFile(_selectedFilePath!);
+                if (ok && _selectedFileItem != null)
+                {
+                    _selectedFileItem.GitStatus = status;
+                }
+            }
+            catch { }
+        }
+        catch (Exception ex)
+        {
+            AppendCliLog("System: Failed to save file: " + ex.Message);
+        }
+    }
+
+    private static string NormalizePath(string p)
+        => Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+    private void TrySetupEditors()
+    {
+        try
+        {
+            _editorBase ??= this.FindControl<TextEditor>("EditorBase");
+            _editorCurrent ??= this.FindControl<TextEditor>("EditorCurrent");
+            _editorCurrent2 ??= this.FindControl<TextEditor>("EditorCurrent2");
+
+            _editorRegistryOptions ??= new RegistryOptions(ThemeName.DarkPlus);
+
+            // Install TextMate highlighting for editors if needed
+            if (_editorBase is not null)
+            {
+                try { var inst = _editorBase.InstallTextMate(_editorRegistryOptions); } catch { }
+                if (_baseDiffRenderer == null)
+                {
+                    _baseDiffRenderer = new DiffGutterRenderer { ShowRemoved = true };
+                    _editorBase.TextArea.TextView.BackgroundRenderers.Add(_baseDiffRenderer);
+                }
+            }
+            if (_editorCurrent2 is not null)
+            {
+                try { var inst = _editorCurrent2.InstallTextMate(_editorRegistryOptions); } catch { }
+                if (_currentDiffRenderer == null)
+                {
+                    _currentDiffRenderer = new DiffGutterRenderer { ShowAdded = true };
+                    _editorCurrent2.TextArea.TextView.BackgroundRenderers.Add(_currentDiffRenderer);
+                }
+            }
+            if (_editorCurrent is not null)
+            {
+                try { var inst = _editorCurrent.InstallTextMate(_editorRegistryOptions); } catch { }
+            }
+
+            EnsureScrollSyncHandlers();
+
+            // Initialize buttons visibility based on current width
+            try
+            {
+                var grid = this.FindControl<Control>("EditorPaneGrid");
+                if (grid != null)
+                {
+                    UpdateEditorButtonsVisibility(grid.Bounds.Width);
+                }
+            }
+            catch { }
+        }
+        catch { }
+    }
+
+    private void EnsureScrollSyncHandlers()
+    {
+        if (_scrollHandlersAttached) return;
+        try
+        {
+            if (_editorBase?.TextArea?.TextView is { } vb)
+            {
+                vb.VisualLinesChanged += OnEditorBaseVisualLinesChanged;
+            }
+            if (_editorCurrent2?.TextArea?.TextView is { } vc)
+            {
+                vc.VisualLinesChanged += OnEditorCurrent2VisualLinesChanged;
+            }
+            _scrollHandlersAttached = true;
+        }
+        catch { }
+    }
+
+    private void OnEditorBaseVisualLinesChanged(object? sender, EventArgs e)
+    {
+        if (!IsCompareMode) return;
+        if (_suppressScrollSync) return;
+        if (_editorBase is null || _editorCurrent2 is null) return;
+        var top = GetTopVisibleLine(_editorBase);
+        if (top <= 0) return;
+        _suppressScrollSync = true;
+        try { _editorCurrent2.ScrollTo(top, 0); }
+        catch { }
+        finally { Dispatcher.UIThread.Post(() => _suppressScrollSync = false); }
+    }
+
+    private void OnEditorCurrent2VisualLinesChanged(object? sender, EventArgs e)
+    {
+        if (!IsCompareMode) return;
+        if (_suppressScrollSync) return;
+        if (_editorBase is null || _editorCurrent2 is null) return;
+        var top = GetTopVisibleLine(_editorCurrent2);
+        if (top <= 0) return;
+        _suppressScrollSync = true;
+        try { _editorBase.ScrollTo(top, 0); }
+        catch { }
+        finally { Dispatcher.UIThread.Post(() => _suppressScrollSync = false); }
+    }
+
+    private static int GetTopVisibleLine(TextEditor editor)
+    {
+        try
+        {
+            var v = editor.TextArea.TextView.VisualLines;
+            if (v is not null && v.Count > 0)
+            {
+                return v[0].FirstDocumentLine.LineNumber;
+            }
+        }
+        catch { }
+        return -1;
+    }
+
+    private void OnEditorPaneSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        try
+        {
+            UpdateEditorButtonsVisibility(e.NewSize.Width);
+        }
+        catch { }
+    }
+
+    private void UpdateEditorButtonsVisibility(double width)
+    {
+        var panel = this.FindControl<Avalonia.Controls.StackPanel>("EditorButtonsPanel");
+        if (panel != null)
+        {
+            panel.IsVisible = width >= EditorButtonsMinWidth;
+        }
+    }
+
+    private void TryApplySyntaxHighlightingForPath(string? filePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            var ext = Path.GetExtension(filePath).ToLowerInvariant();
+            string scope = ext switch
+            {
+                ".cs" => "source.cs",
+                ".js" => "source.js",
+                ".ts" => "source.ts",
+                ".json" => "source.json",
+                ".xml" => "text.xml",
+                ".yml" or ".yaml" => "source.yaml",
+                ".py" => "source.python",
+                ".rb" => "source.ruby",
+                ".go" => "source.go",
+                ".rs" => "source.rust",
+                ".java" => "source.java",
+                ".css" => "source.css",
+                ".html" or ".htm" => "text.html.basic",
+                ".md" => "text.md",
+                ".sh" => "source.shell",
+                ".ps1" => "source.powershell",
+                ".sql" => "source.sql",
+                ".toml" => "source.toml",
+                ".ini" => "source.ini",
+                _ => "text.plain"
+            };
+
+            // Apply to all three editors (current, base, current2)
+            if (_editorRegistryOptions is null) _editorRegistryOptions = new RegistryOptions(ThemeName.DarkPlus);
+            if (_editorCurrent is not null)
+            {
+                try { var inst = _editorCurrent.InstallTextMate(_editorRegistryOptions); inst.SetGrammar(scope); } catch { }
+            }
+            if (_editorCurrent2 is not null)
+            {
+                try { var inst = _editorCurrent2.InstallTextMate(_editorRegistryOptions); inst.SetGrammar(scope); } catch { }
+            }
+            if (_editorBase is not null)
+            {
+                try { var inst = _editorBase.InstallTextMate(_editorRegistryOptions); inst.SetGrammar(scope); } catch { }
+            }
+        }
+        catch { }
     }
 
     private async Task RestartCliAsync()

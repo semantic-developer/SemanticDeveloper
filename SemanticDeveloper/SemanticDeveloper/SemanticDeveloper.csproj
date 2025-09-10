@@ -19,6 +19,11 @@
             <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
         </PackageReference>
         <PackageReference Include="AvaloniaEdit.TextMate" Version="11.3.0" />
+        <PackageReference Include="LibGit2Sharp" Version="0.31.0" />
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Folder Include="Images\" />
     </ItemGroup>
 </Project>
