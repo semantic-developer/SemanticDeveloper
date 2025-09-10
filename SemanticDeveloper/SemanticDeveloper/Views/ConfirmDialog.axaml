@@ -1,0 +1,17 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="SemanticDeveloper.Views.ConfirmDialog"
+        Width="420" Height="180"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Title="Confirm">
+    <Grid RowDefinitions="*,Auto" Margin="16">
+        <TextBlock x:Name="MessageText" TextWrapping="Wrap"/>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Width="96" x:Name="CancelButton" Click="OnCancel">Cancel</Button>
+            <Button Width="96" x:Name="OkButton" Click="OnOk">OK</Button>
+        </StackPanel>
+    </Grid>
+</Window>
+
