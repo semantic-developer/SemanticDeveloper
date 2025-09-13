@@ -12,7 +12,13 @@ public class FileTreeItem : INotifyPropertyChanged
     public string Name
     {
         get => _name;
-        set { if (_name == value) return; _name = value; OnPropertyChanged(); }
+        set
+        {
+            if (_name == value) return;
+            _name = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(IconBackground));
+        }
     }
     public string FullPath { get; init; } = string.Empty;
     public bool IsDirectory { get; init; }
@@ -29,6 +35,9 @@ public class FileTreeItem : INotifyPropertyChanged
             OnPropertyChanged();
             OnPropertyChanged(nameof(GitStatusShort));
             OnPropertyChanged(nameof(StatusBrush));
+            OnPropertyChanged(nameof(HasGitStatus));
+            OnPropertyChanged(nameof(GitStatusLetter));
+            OnPropertyChanged(nameof(HasStatusLetter));
         }
     }
 
@@ -39,6 +48,8 @@ public class FileTreeItem : INotifyPropertyChanged
         "deleted" => "D",
         _ => string.Empty
     };
+
+    public bool HasGitStatus => !string.IsNullOrEmpty(GitStatusShort);
 
     public string StatusBrush => GitStatus switch
     {
@@ -52,6 +63,48 @@ public class FileTreeItem : INotifyPropertyChanged
     public string IconGeometry => IsDirectory
         ? "M2,6 L8,6 L10,8 L22,8 L22,20 L2,20 Z" // folder-like
         : "M6,4 L18,4 L18,20 L6,20 Z"; // file-like
+
+    // Subtle colored background for the icon based on file type
+    public string IconBackground
+    {
+        get
+        {
+            if (IsDirectory) return "#2D3748"; // slate-ish
+            var ext = Path.GetExtension(Name).ToLowerInvariant();
+            return ext switch
+            {
+                ".cs" => "#512BD4",
+                ".ts" => "#3178C6",
+                ".js" => "#C7A600",
+                ".json" => "#2E7D32",
+                ".md" => "#4B5563",
+                ".yml" or ".yaml" => "#2B6CB0",
+                ".xml" => "#6B7280",
+                ".py" => "#3572A5",
+                ".rb" => "#701516",
+                ".go" => "#00ADD8",
+                ".rs" => "#B7410E",
+                ".java" => "#E41F1F",
+                ".css" => "#2965F1",
+                ".html" or ".htm" => "#E34F26",
+                ".sh" => "#4E9A06",
+                ".sql" => "#1F6FEB",
+                ".toml" => "#6B8E23",
+                ".ini" => "#6B7280",
+                _ => "#3A3A3A"
+            };
+        }
+    }
+
+    // Minimal status letter to draw inside icon (A = added, U = updated)
+    public string GitStatusLetter => GitStatus switch
+    {
+        "added" => "A",
+        "modified" => "U",
+        _ => string.Empty
+    };
+
+    public bool HasStatusLetter => !string.IsNullOrEmpty(GitStatusLetter);
 
     // Create item with lazy loading (adds a placeholder to show expander)
     public static FileTreeItem CreateLazy(string path)

@@ -46,7 +46,14 @@
         </Border>
 
         <!-- Body split: left file tree, right CLI output -->
-        <Grid Grid.Row="1" ColumnDefinitions="320,Auto,*,Auto,*">
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*" MinWidth="400"/>
+            </Grid.ColumnDefinitions>
             <!-- Left: directory tree -->
             <Border BorderBrush="#333" BorderThickness="0,0,1,0" Background="#1F1F1F">
                 <Grid RowDefinitions="Auto,*">
@@ -54,13 +61,24 @@
                     <TreeView x:Name="WorkspaceTree" Grid.Row="1" ItemsSource="{Binding TreeRoots}" SelectionChanged="OnTreeSelectionChanged">
                         <TreeView.DataTemplates>
                             <TreeDataTemplate DataType="models:FileTreeItem" ItemsSource="{Binding Children}">
-                                <StackPanel Orientation="Horizontal" Spacing="6">
-                                    <Path Width="14" Height="14"
-                                          Data="{Binding IconGeometry}"
-                                          Fill="{Binding StatusBrush}"/>
-                                    <TextBlock Text="{Binding Name}" Foreground="#E6E6E6"/>
-                                    <TextBlock Margin="6,0,0,0" Text="{Binding GitStatusShort}" Foreground="{Binding StatusBrush}"/>
-                                </StackPanel>
+                                <Grid ColumnDefinitions="Auto,6,*" VerticalAlignment="Center">
+                                    <Grid Width="16" Height="16" VerticalAlignment="Center" ClipToBounds="True">
+                                        <Path Width="16" Height="16"
+                                              Data="{Binding IconGeometry}"
+                                              Fill="#CFCFCF"
+                                              Stretch="Uniform"/>
+                                        <TextBlock Text="{Binding GitStatusLetter}"
+                                                   IsVisible="{Binding HasStatusLetter}"
+                                                   Foreground="#444444"
+                                                   FontSize="10"
+                                                   FontWeight="Bold"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"
+                                                   TextAlignment="Center"
+                                                   Margin="-3,0,0,0"/>
+                                    </Grid>
+                                    <TextBlock Grid.Column="2" Text="{Binding Name}" Foreground="#E6E6E6" VerticalAlignment="Center"/>
+                                </Grid>
                             </TreeDataTemplate>
                         </TreeView.DataTemplates>
                     </TreeView>
@@ -91,15 +109,18 @@
                         </StackPanel>
                     </Border>
                     <Border Grid.Row="1" BorderBrush="#555" BorderThickness="1" CornerRadius="0,0,4,4">
-                        <ae:TextEditor x:Name="EditorCurrent"
-                            Document="{Binding CurrentFileDocument, Mode=OneWay}"
-                            IsReadOnly="False"
-                            WordWrap="False"
-                            ShowLineNumbers="True"
-                            Background="#0A0A0A"
-                            Foreground="#E6E6E6"
-                            FontFamily="Consolas, Menlo, monospace"
-                            FontSize="13" />
+                        <Grid>
+                            <ae:TextEditor x:Name="EditorCurrent"
+                                Document="{Binding CurrentFileDocument, Mode=OneWay}"
+                                IsReadOnly="False"
+                                WordWrap="False"
+                                ShowLineNumbers="True"
+                                Background="#0A0A0A"
+                                Foreground="#E6E6E6"
+                                FontFamily="Consolas, Menlo, monospace"
+                                FontSize="13" />
+                            <Image x:Name="ImageCurrent" Stretch="Uniform" IsVisible="False"/>
+                        </Grid>
                     </Border>
                 </Grid>
 
@@ -117,28 +138,34 @@
                     </Border>
 
                     <Border Grid.Column="0" Grid.Row="1" BorderBrush="#555" BorderThickness="1" CornerRadius="0,0,4,4">
-                        <ae:TextEditor x:Name="EditorBase"
-                            Document="{Binding BaseFileDocument, Mode=OneWay}"
-                            IsReadOnly="True"
-                            WordWrap="False"
-                            ShowLineNumbers="True"
-                            Background="#0A0A0A"
-                            Foreground="#E6E6E6"
-                            FontFamily="Consolas, Menlo, monospace"
-                            FontSize="13" />
+                        <Grid>
+                            <ae:TextEditor x:Name="EditorBase"
+                                Document="{Binding BaseFileDocument, Mode=OneWay}"
+                                IsReadOnly="True"
+                                WordWrap="False"
+                                ShowLineNumbers="True"
+                                Background="#0A0A0A"
+                                Foreground="#E6E6E6"
+                                FontFamily="Consolas, Menlo, monospace"
+                                FontSize="13" />
+                            <Image x:Name="ImageBase" Stretch="Uniform" IsVisible="False"/>
+                        </Grid>
                     </Border>
                     <GridSplitter Grid.Column="1" Grid.Row="1" Width="5" Background="#2A2A2A" HorizontalAlignment="Stretch"
                                   ResizeDirection="Columns" ShowsPreview="True"/>
                     <Border Grid.Column="2" Grid.Row="1" BorderBrush="#555" BorderThickness="1" CornerRadius="0,0,4,4">
-                        <ae:TextEditor x:Name="EditorCurrent2"
-                            Document="{Binding CurrentFileDocument, Mode=OneWay}"
-                            IsReadOnly="False"
-                            WordWrap="False"
-                            ShowLineNumbers="True"
-                            Background="#0A0A0A"
-                            Foreground="#E6E6E6"
-                            FontFamily="Consolas, Menlo, monospace"
-                            FontSize="13" />
+                        <Grid>
+                            <ae:TextEditor x:Name="EditorCurrent2"
+                                Document="{Binding CurrentFileDocument, Mode=OneWay}"
+                                IsReadOnly="False"
+                                WordWrap="False"
+                                ShowLineNumbers="True"
+                                Background="#0A0A0A"
+                                Foreground="#E6E6E6"
+                                FontFamily="Consolas, Menlo, monospace"
+                                FontSize="13" />
+                            <Image x:Name="ImageCurrent2" Stretch="Uniform" IsVisible="False"/>
+                        </Grid>
                     </Border>
                 </Grid>
             </Grid>
@@ -148,7 +175,7 @@
                           ResizeDirection="Columns" ShowsPreview="True"/>
 
             <!-- Right: CLI session area -->
-            <Grid Grid.Column="4" RowDefinitions="Auto,*,Auto">
+            <Grid x:Name="RightPaneGrid" Grid.Column="4" RowDefinitions="Auto,*,Auto" MinWidth="400" SizeChanged="OnRightPaneSizeChanged">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Top" Margin="10" Spacing="8">
                     <TextBlock FontWeight="SemiBold" Text="Codex CLI Session"/>
                     <TextBlock Text="—"/>
@@ -156,6 +183,7 @@
                     <ProgressBar Width="60" Height="6" IsIndeterminate="True" IsVisible="{Binding IsBusy}" Margin="8,0,0,0" Opacity="0.35"/>
                     <TextBlock Text="•" Margin="8,0,0,0"/>
                     <TextBlock Text="{Binding TokenStats}"/>
+                    
                 </StackPanel>
 
                 <Border Grid.Row="1" Margin="10" BorderBrush="#DDD" BorderThickness="1" CornerRadius="4">
@@ -175,13 +203,57 @@
                         <Button x:Name="RestartCliButton" Click="OnRestartCliClick" IsEnabled="{Binding HasWorkspace}">Restart Session</Button>
                         <Button x:Name="StopCliButton" Click="OnStopCliClick" IsEnabled="{Binding IsCliRunning}">Stop</Button>
                         <Button x:Name="ClearLogButton" Click="OnClearLogClick">Clear Log</Button>
+                        <Button x:Name="OpenShellButton" Click="OnOpenShellClick">Shell</Button>
                     </StackPanel>
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <TextBox HorizontalAlignment="Stretch" MinWidth="200" Watermark="Type input and press Enter"
-                                 Text="{Binding CliInput, Mode=TwoWay}" KeyDown="OnCliInputKeyDown"/>
-                        <Button x:Name="SendCliInputButton" Click="OnSendCliInputClick" IsEnabled="{Binding IsCliRunning}">Send</Button>
-                    </StackPanel>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <TextBox Grid.Column="0" x:Name="CliInputTextBox"
+                                 Watermark="Type input and press Enter"
+                                 TextWrapping="Wrap"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 AcceptsReturn="True"
+                                 Height="60"
+                                 Text="{Binding CliInput, Mode=TwoWay}"
+                                 KeyDown="OnCliInputKeyDown"/>
+                        <Button Grid.Column="1" x:Name="SendCliInputButton" Click="OnSendCliInputClick" IsEnabled="{Binding IsCliRunning}" IsDefault="True">Send</Button>
+                    </Grid>
                 </StackPanel>
+                
+                <!-- Shell modal overlay on a canvas for precise positioning -->
+                <Canvas x:Name="ShellOverlay" Grid.RowSpan="3" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                    <Border x:Name="ShellPanel" IsVisible="{Binding IsShellPanelOpen}"
+                            MinWidth="380" Height="100"
+                            Background="#1A1A1A" BorderBrush="#22FFFFFF" BorderThickness="1" CornerRadius="6">
+                        <Grid>
+                            <!-- Close 'x' in corner -->
+                            <Button Content="✕" Width="20" Height="20"
+                                    HorizontalAlignment="Right" VerticalAlignment="Top"
+                                    Margin="0,0,0,0" Padding="0"
+                                    Click="OnCloseShellClick"/>
+                            <StackPanel Orientation="Vertical" Margin="8,6,28,6" Spacing="6">
+                                <!-- Prompt line above input -->
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock VerticalAlignment="Center" FontFamily="Consolas, Menlo, monospace" Foreground="#CFCFCF" Text="{Binding ShellPromptPath}"/>
+                                    <TextBlock VerticalAlignment="Center" FontFamily="Consolas, Menlo, monospace" Foreground="#CFCFCF" Text="$"/>
+                                </StackPanel>
+                                <!-- Input and Run button -->
+                                <Grid ColumnDefinitions="*,Auto">
+                                    <TextBox Grid.Column="0" x:Name="ShellInputTextBox"
+                                             FontFamily="Consolas, Menlo, monospace"
+                                             Background="#0A0A0A"
+                                             Foreground="#E6E6E6"
+                                             Watermark="Enter command"
+                                             HorizontalAlignment="Stretch"
+                                             MinWidth="120"
+                                             Padding="0, 0, 2, 0"
+                                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                             KeyDown="OnShellInputKeyDown"/>
+                                    <Button Grid.Column="1" Padding="8,0,8,0" x:Name="RunShellButton" Click="OnRunShellClick">Run</Button>
+                                </Grid>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Canvas>
             </Grid>
         </Grid>
     </Grid>

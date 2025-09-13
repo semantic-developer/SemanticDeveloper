@@ -9,6 +9,7 @@ public class LogPrefixColorizer : DocumentColorizingTransformer
     private static readonly SolidColorBrush UserBrush = new SolidColorBrush(Color.Parse("#4FC1FF"));
     private static readonly SolidColorBrush AssistantBrush = new SolidColorBrush(Color.Parse("#A5D6A7"));
     private static readonly SolidColorBrush SystemBrush = new SolidColorBrush(Color.Parse("#FFC66D"));
+    private static readonly SolidColorBrush ShellBrush = new SolidColorBrush(Color.Parse("#9BB5FF"));
 
     protected override void ColorizeLine(DocumentLine line)
     {
@@ -38,6 +39,14 @@ public class LogPrefixColorizer : DocumentColorizingTransformer
             ChangeLinePart(line.Offset, line.Offset + 7, el =>
             {
                 el.TextRunProperties.SetForegroundBrush(SystemBrush);
+                el.TextRunProperties.SetTypeface(new Typeface(el.TextRunProperties.Typeface.FontFamily, FontStyle.Normal, FontWeight.SemiBold));
+            });
+        }
+        else if (text.StartsWith("Shell:"))
+        {
+            ChangeLinePart(line.Offset, line.Offset + 6, el =>
+            {
+                el.TextRunProperties.SetForegroundBrush(ShellBrush);
                 el.TextRunProperties.SetTypeface(new Typeface(el.TextRunProperties.Typeface.FontFamily, FontStyle.Normal, FontWeight.SemiBold));
             });
         }

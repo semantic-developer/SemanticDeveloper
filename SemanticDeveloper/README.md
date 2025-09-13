@@ -35,7 +35,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
 4. “CLI Settings” lets you change:
    - `Command` (default: `codex`)
    - `Additional Arguments` (e.g., `--model=gpt-5-high` or `-c model=gpt-5-high`)
-   - Auto‑approve tool/patch requests
+   - Verbose logging (show suppressed output)
 
 5. The left file tree and right log pane are resizable using the vertical splitter between them.
 
@@ -66,6 +66,9 @@ The app integrates basic Git operations directly in the header. All actions use 
       - Example log: `Created and checked out 'feature-x' (based on origin/main).`
   - Switch Branch…
     - Checks out an existing branch by name (no automatic fetch/merge).
+  - Rollback Changes…
+    - Hard‑resets the working directory to `HEAD` and deletes untracked files.
+    - Prompts for confirmation since this discards local changes.
   - Refresh
     - Refreshes the branch label and the file tree’s Git status coloring.
 
@@ -88,7 +91,7 @@ Notes
     `cwd`, `approval_policy` (defaults to `on-request`), `sandbox_policy` (defaults to
     `workspace-write`), optional `model`, and default reasoning fields.
 - Auto‑approval: when the CLI emits an `exec_approval_request` or `apply_patch_approval_request`,
-  the app responds with the corresponding approval submission (can be disabled in settings).
+  the app automatically approves the request. There is no setting to toggle this.
 
 - Conversation rendering (right pane):
   - Messages are labeled and colorized: `You:`, `Assistant:`, and `System:`.

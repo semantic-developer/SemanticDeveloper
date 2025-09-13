@@ -20,6 +20,8 @@ using AvaloniaEdit.Document;
 using AvaloniaEdit.TextMate;
 using AvaloniaEdit.Rendering;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Controls.Primitives;
 using TextMateSharp.Grammars;
 using TextMateSharp.Registry;
 using SemanticDeveloper.Models;
@@ -36,7 +38,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private ProtoHelper.ContentStyle _contentStyle = ProtoHelper.ContentStyle.Flattened;
     private string _defaultMsgType = "user_turn";
     private string? _currentModel;
-    private bool _autoApproveEnabled = true;
+    // Auto-approval UI removed; approvals require manual handling
     private AppSettings _settings = new();
 
     private string? _currentWorkspacePath;
@@ -63,16 +65,41 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private TextEditor? _editorBase;
     private TextEditor? _editorCurrent;
     private TextEditor? _editorCurrent2;
+    private Image? _imageBase;
+    private Image? _imageCurrent;
+    private Image? _imageCurrent2;
     private RegistryOptions? _editorRegistryOptions;
     private bool _suppressScrollSync;
     private bool _scrollHandlersAttached;
     private const double EditorButtonsMinWidth = 420.0;
+    private bool _verboseLogging;
+
+    // Track exec command outputs to avoid flooding log
+    private readonly System.Collections.Generic.Dictionary<string, int> _execOutputBytes = new();
+    private readonly System.Collections.Generic.HashSet<string> _execTruncated = new();
+    private readonly System.Collections.Generic.HashSet<string> _execSuppressed = new();
+    private readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<string>> _execCommandById = new();
+    private const int ExecOutputSoftLimit = 2000; // cap per command
+
+    private enum ScrollMaster { None, Base, Current }
+    private ScrollMaster _scrollMaster = ScrollMaster.None;
 
     public MainWindow()
     {
         InitializeComponent();
 
         DataContext = this;
+
+        // Capture Enter/Shift+Enter on the CLI input box before default handling
+        try
+        {
+            var cliTb = this.FindControl<TextBox>("CliInputTextBox");
+            if (cliTb != null)
+            {
+                cliTb.AddHandler(InputElement.KeyDownEvent, OnCliInputPreviewKeyDown, RoutingStrategies.Tunnel);
+            }
+        }
+        catch { }
 
         // Install TextMate JSON highlighting for the log editor (best-effort)
         try
@@ -94,7 +121,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _cli.AdditionalArgs = _settings.AdditionalArgs;
         AppendCliLog($"System: Loaded CLI settings: '{_cli.Command}' {_cli.AdditionalArgs}");
         _currentModel = TryExtractModelFromArgs(_cli.AdditionalArgs);
-        _autoApproveEnabled = _settings.AutoApproveEnabled;
+        _verboseLogging = _settings.VerboseLoggingEnabled;
 
         _cli.OutputReceived += OnCliOutput;
         _cli.Exited += (_, _) =>
@@ -113,6 +140,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         TrySetupEditors();
     }
 
+    private async void OnCliInputPreviewKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (sender is not TextBox tb) return;
+        var isEnter = e.Key == Key.Enter || e.Key == Key.Return;
+        if (!isEnter) return;
+
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Shift))
+        {
+            // Insert a newline manually and consume the event
+            e.Handled = true;
+            try
+            {
+                var t = tb.Text ?? string.Empty;
+                var caret = tb.CaretIndex;
+                var nl = "\n";
+                tb.Text = t.Insert(caret, nl);
+                tb.CaretIndex = caret + nl.Length;
+            }
+            catch { }
+            return;
+        }
+
+        // Plain Enter sends
+        e.Handled = true;
+        CliInput = tb.Text ?? string.Empty;
+        await SendCliInputAsync();
+    }
+
     public new event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
@@ -125,10 +180,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _currentWorkspacePath = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(HasWorkspace));
+            // Reset shell working directory to new workspace by default
+            _shellCwd = _currentWorkspacePath;
+            _shellPrevCwd = null;
+            OnPropertyChanged(nameof(ShellPromptPath));
         }
     }
 
     public bool HasWorkspace => !string.IsNullOrWhiteSpace(CurrentWorkspacePath) && Directory.Exists(CurrentWorkspacePath);
+
+    public string ShellPromptPath
+    {
+        get
+        {
+            var path = _shellCwd ?? CurrentWorkspacePath ?? string.Empty;
+            const int MaxLen = 30;
+            if (string.IsNullOrEmpty(path) || path.Length <= MaxLen) return path;
+            // Keep the tail end, prefix with ellipsis
+            var tailLen = Math.Max(1, MaxLen - 1);
+            return "…" + path.Substring(path.Length - tailLen, tailLen);
+        }
+    }
 
     public string CliLog
     {
@@ -196,6 +268,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    
+
     public bool IsCompareMode
     {
         get => _isCompareMode;
@@ -207,6 +281,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             RefreshEditorPanelsVisibility();
             _ = RefreshBaseDocumentAsync();
             TrySetupEditors();
+            _scrollMaster = ScrollMaster.None;
         }
     }
 
@@ -284,10 +359,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void OnCliOutput(object? sender, string line)
     {
-        // Hide noisy agent logs
-        if (LooksLikeAgentLog(line)) return;
-        // Hide verbose function call apply_patch payloads
-        if (IsFunctionCallApplyPatch(line)) { SetStatusSafe("thinking…"); AppendCliLog("System: Applying patch…"); return; }
+        // Hide noisy agent logs (unless verbose)
+        if (!_verboseLogging && LooksLikeAgentLog(line)) return;
+        // Hide verbose function call apply_patch payloads (unless verbose)
+        if (!_verboseLogging && IsFunctionCallApplyPatch(line)) { SetStatusSafe("thinking…"); AppendCliLog("System: Applying patch…"); return; }
 
         // Prefer pretty rendering for protocol JSON events; fallback to raw text
         var handled = TryRenderProtocolEvent(line);
@@ -295,21 +370,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             AppendCliLog(line);
         }
-        if (_autoApproveEnabled && !handled)
-        {
-            try { TryHandleApprovalRequest(line); } catch { }
-            // If CLI complains about missing id on a submission, try approving with last submit id
-            if (line.Contains("missing field `id`"))
-            {
-                var sid = Services.ProtoHelper.LastSubmitId;
-                if (!string.IsNullOrWhiteSpace(sid))
-                {
-                    var approvalJson = Services.ProtoHelper.BuildApproval("exec_approval", sid!, "approved", _submissionShape);
-                    _ = _cli.SendAsync(approvalJson);
-                    AppendCliLog($"System: Auto-approved exec_approval for last submission id {sid}.");
-                }
-            }
-        }
+        // Auto-approval disabled; do not auto-respond to approval requests
         var l = line.ToLowerInvariant();
         if (l.Contains("expected internally tagged enum op") && _submissionShape == ProtoHelper.SubmissionShape.TopLevelInternallyTagged)
         {
@@ -433,11 +494,47 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     try
                     {
                         var chunkB64 = msg? ["chunk"]?.ToString();
+                        var callId = msg? ["call_id"]?.ToString();
                         if (!string.IsNullOrEmpty(chunkB64))
                         {
                             var bytes = Convert.FromBase64String(chunkB64);
                             var text = System.Text.Encoding.UTF8.GetString(bytes);
-                            if (!string.IsNullOrEmpty(text)) AppendCliInline(text);
+                            if (!string.IsNullOrEmpty(text))
+                            {
+                                if (!string.IsNullOrWhiteSpace(callId) && _execSuppressed.Contains(callId!))
+                                {
+                                    // suppress noisy file dumps
+                                }
+                                else if (!string.IsNullOrWhiteSpace(callId))
+                                {
+                                    var used = _execOutputBytes.TryGetValue(callId!, out var v) ? v : 0;
+                                    if (used >= ExecOutputSoftLimit)
+                                    {
+                                        _execTruncated.Add(callId!);
+                                    }
+                                    else
+                                    {
+                                        var remaining = ExecOutputSoftLimit - used;
+                                        var toWrite = Math.Min(remaining, text.Length);
+                                        if (toWrite > 0)
+                                        {
+                                            AppendCliInline(text.Substring(0, toWrite));
+                                            _execOutputBytes[callId!] = used + toWrite;
+                                        }
+                                        if (toWrite < text.Length)
+                                        {
+                                            _execTruncated.Add(callId!);
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    // Unknown call; write with small cap
+                                    var toWrite = Math.Min(ExecOutputSoftLimit, text.Length);
+                                    AppendCliInline(text.Substring(0, toWrite));
+                                    if (toWrite < text.Length && !CliLog.EndsWith("\n")) AppendCliInline("\n… (output truncated)\n");
+                                }
+                            }
                         }
                     }
                     catch { }
@@ -446,7 +543,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             case "exec_command_begin":
                 {
                     var cmdArr = msg? ["command"] as Newtonsoft.Json.Linq.JArray;
-                    var cmd = cmdArr is null ? string.Empty : string.Join(" ", cmdArr.Take(5).Select(t => t?.ToString() ?? string.Empty));
+                    var callId = msg? ["call_id"]?.ToString();
+                    var tokens = cmdArr is null ? new System.Collections.Generic.List<string>() : cmdArr.Select(t => t?.ToString() ?? string.Empty).ToList();
+                    if (!string.IsNullOrWhiteSpace(callId))
+                    {
+                        _execOutputBytes[callId!] = 0;
+                        _execTruncated.Remove(callId!);
+                        _execSuppressed.Remove(callId!);
+                        _execCommandById[callId!] = tokens;
+                        var joined = string.Join(" ", tokens).ToLowerInvariant();
+                        if (joined.Contains(" sed ") || joined.Contains(" sed -n") || joined.Contains(" ripgrep") || joined.Contains(" rg ") || joined.Contains(" cat ") || joined.Contains(" type "))
+                        {
+                            _execSuppressed.Add(callId!);
+                        }
+                    }
+                    var cmd = tokens.Count == 0 ? string.Empty : string.Join(" ", tokens.Take(5));
                     if (!string.IsNullOrEmpty(cmd))
                     {
                         if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
@@ -458,8 +569,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             case "exec_command_end":
                 {
                     var code = msg? ["exit_code"]?.ToString();
+                    var callId = msg? ["call_id"]?.ToString();
                     if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
-                    AppendCliLog($"System: (exit {code})");
+                    if (!string.IsNullOrWhiteSpace(callId) && _execSuppressed.Contains(callId!))
+                        AppendCliLog($"System: (exit {code}) — output suppressed");
+                    else if (!string.IsNullOrWhiteSpace(callId) && _execTruncated.Contains(callId!))
+                        AppendCliLog($"System: (exit {code}) — output truncated");
+                    else
+                        AppendCliLog($"System: (exit {code})");
                     return true;
                 }
             case "patch_apply_begin":
@@ -494,38 +611,35 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             case "exec_approval_request":
             case "apply_patch_approval_request":
                 {
-                    if (_autoApproveEnabled)
+                    try
                     {
-                        try
+                        var eventId = root["id"]?.ToString();
+                        if (!string.IsNullOrWhiteSpace(eventId))
                         {
-                            var eventId = root["id"]?.ToString();
-                            if (!string.IsNullOrWhiteSpace(eventId))
+                            var op = lower.StartsWith("exec") ? "exec_approval" : "patch_approval";
+                            var approvalJson = Services.ProtoHelper.BuildApproval(op, eventId!, "approved", _submissionShape);
+                            _ = _cli.SendAsync(approvalJson);
+                            var summary = string.Empty;
+                            if (lower.StartsWith("exec"))
                             {
-                                var op = lower.StartsWith("exec") ? "exec_approval" : "apply_patch_approval";
-                                var approvalJson = Services.ProtoHelper.BuildApproval(op, eventId!, "approved", _submissionShape);
-                                _ = _cli.SendAsync(approvalJson);
-                                var summary = string.Empty;
-                                if (lower.StartsWith("exec"))
+                                var cmdArr = msg? ["command"] as Newtonsoft.Json.Linq.JArray;
+                                if (cmdArr != null && cmdArr.Count > 0)
                                 {
-                                    var cmdArr = msg? ["command"] as Newtonsoft.Json.Linq.JArray;
-                                    if (cmdArr != null && cmdArr.Count > 0)
-                                    {
-                                        var tokens = cmdArr.Select(t => t?.ToString() ?? string.Empty).ToList();
-                                        if (tokens.Any(t => t.StartsWith("*** Begin Patch")) || tokens.Contains("apply_patch"))
-                                            summary = "apply_patch";
-                                        else
-                                            summary = string.Join(" ", tokens.Take(5));
-                                    }
-                                }
-                                if (!string.IsNullOrEmpty(summary))
-                                {
-                                    if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
-                                    AppendCliLog($"System: Auto-approved {op}: {summary}");
+                                    var tokens = cmdArr.Select(t => t?.ToString() ?? string.Empty).ToList();
+                                    if (tokens.Any(t => t.StartsWith("*** Begin Patch")) || tokens.Contains("apply_patch"))
+                                        summary = "apply_patch";
+                                    else
+                                        summary = string.Join(" ", tokens.Take(5));
                                 }
                             }
+                            if (!string.IsNullOrEmpty(summary))
+                            {
+                                if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
+                                AppendCliLog($"System: Auto-approved {op}: {summary}");
+                            }
                         }
-                        catch { }
                     }
+                    catch { }
                     return true;
                 }
             case "task_started":
@@ -558,39 +672,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private async void TryHandleApprovalRequest(string line)
-    {
-        var json = line.Trim();
-        if (!json.StartsWith("{")) return;
-        Newtonsoft.Json.Linq.JObject? root;
-        try { root = (Newtonsoft.Json.Linq.JObject?)Newtonsoft.Json.Linq.JToken.Parse(json); }
-        catch { return; }
-        if (root is null) return;
-
-        var msg = root["msg"] as Newtonsoft.Json.Linq.JObject;
-        string? type = msg? ["type"]?.ToString();
-        string? reqId = msg? ["id"]?.ToString() ?? msg? ["request_id"]?.ToString();
-        // Fallback to top-level event id (correlates to submission)
-        reqId ??= root["id"]?.ToString();
-        if (string.IsNullOrWhiteSpace(type) || string.IsNullOrWhiteSpace(reqId))
-        {
-            // Try nested op object
-            var inner = root["op"] as Newtonsoft.Json.Linq.JObject;
-            type ??= inner? ["op"]?.ToString();
-            reqId ??= inner? ["id"]?.ToString();
-        }
-        if (string.IsNullOrWhiteSpace(type) || string.IsNullOrWhiteSpace(reqId)) return;
-
-        var lower = type.ToLowerInvariant();
-        string? approvalOp = null;
-        if (lower.Contains("exec") && lower.Contains("approval")) approvalOp = "exec_approval";
-        if (lower.Contains("patch") && lower.Contains("approval")) approvalOp = "patch_approval";
-        if (approvalOp is null) return;
-
-        var approvalJson = Services.ProtoHelper.BuildApproval(approvalOp, reqId, "approved", _submissionShape);
-        await _cli.SendAsync(approvalJson);
-        AppendCliLog($"Auto-approved {approvalOp} for id {reqId}.");
-    }
+    // Auto-approval helper removed
 
     private void SetStatusSafe(string status)
     {
@@ -796,16 +878,52 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SelectedFileName = Path.GetFileName(path);
         try
         {
-            string text = string.Empty;
-            using (var fs = File.OpenRead(path))
-            using (var sr = new StreamReader(fs, Encoding.UTF8, true))
+            if (IsImagePath(path))
             {
-                text = await sr.ReadToEndAsync();
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        var bmp = new Bitmap(path);
+                        if (_imageCurrent != null)
+                        {
+                            _imageCurrent.Source = bmp;
+                            _imageCurrent.IsVisible = true;
+                        }
+                        if (_editorCurrent != null) _editorCurrent.IsVisible = false;
+                        if (_imageCurrent2 != null) { _imageCurrent2.Source = bmp; _imageCurrent2.IsVisible = true; }
+                        if (_editorCurrent2 != null) _editorCurrent2.IsVisible = false;
+                    }
+                    catch (Exception ex)
+                    {
+                        CurrentFileDocument.Text = $"Failed to load image: {ex.Message}";
+                        if (_imageCurrent != null) { _imageCurrent.IsVisible = false; _imageCurrent.Source = null; }
+                        if (_editorCurrent != null) _editorCurrent.IsVisible = true;
+                        if (_imageCurrent2 != null) { _imageCurrent2.IsVisible = false; _imageCurrent2.Source = null; }
+                        if (_editorCurrent2 != null) _editorCurrent2.IsVisible = true;
+                    }
+                });
             }
-            if (Dispatcher.UIThread.CheckAccess())
-                CurrentFileDocument.Text = text;
             else
-                Dispatcher.UIThread.Post(() => CurrentFileDocument.Text = text);
+            {
+                string text = string.Empty;
+                using (var fs = File.OpenRead(path))
+                using (var sr = new StreamReader(fs, Encoding.UTF8, true))
+                {
+                    text = await sr.ReadToEndAsync();
+                }
+                if (Dispatcher.UIThread.CheckAccess())
+                    CurrentFileDocument.Text = text;
+                else
+                    Dispatcher.UIThread.Post(() => CurrentFileDocument.Text = text);
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    if (_imageCurrent != null) { _imageCurrent.IsVisible = false; _imageCurrent.Source = null; }
+                    if (_editorCurrent != null) _editorCurrent.IsVisible = true;
+                    if (_imageCurrent2 != null) { _imageCurrent2.IsVisible = false; _imageCurrent2.Source = null; }
+                    if (_editorCurrent2 != null) _editorCurrent2.IsVisible = true;
+                });
+            }
         }
         catch (Exception ex)
         {
@@ -826,9 +944,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             // Clear base doc when not comparing
             if (Dispatcher.UIThread.CheckAccess())
+            {
                 BaseFileDocument.Text = string.Empty;
+                if (_imageBase != null) { _imageBase.IsVisible = false; _imageBase.Source = null; }
+                if (_editorBase != null) _editorBase.IsVisible = true;
+            }
             else
-                Dispatcher.UIThread.Post(() => BaseFileDocument.Text = string.Empty);
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    BaseFileDocument.Text = string.Empty;
+                    if (_imageBase != null) { _imageBase.IsVisible = false; _imageBase.Source = null; }
+                    if (_editorBase != null) _editorBase.IsVisible = true;
+                });
+            }
             return;
         }
 
@@ -845,26 +974,78 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             try
             {
-                var (ok, content, error) = Services.GitHelper.TryReadTextAtHead(_selectedFilePath!);
-                var text = ok ? (content ?? string.Empty) : $"No HEAD version available: {error}";
-                if (Dispatcher.UIThread.CheckAccess()) BaseFileDocument.Text = text;
-                else Dispatcher.UIThread.Post(() => BaseFileDocument.Text = text);
+                if (IsImagePath(_selectedFilePath!))
+                {
+                    var (okImg, bytes, errImg) = Services.GitHelper.TryReadBytesAtHead(_selectedFilePath!);
+                    if (okImg && bytes != null)
+                    {
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            try
+                            {
+                                var bmp = new Bitmap(new MemoryStream(bytes));
+                                if (_imageBase != null)
+                                {
+                                    _imageBase.Source = bmp;
+                                    _imageBase.IsVisible = true;
+                                }
+                                if (_editorBase != null) _editorBase.IsVisible = false;
+                            }
+                            catch (Exception ex)
+                            {
+                                BaseFileDocument.Text = $"Failed to load base image: {ex.Message}";
+                                if (_imageBase != null) { _imageBase.IsVisible = false; _imageBase.Source = null; }
+                                if (_editorBase != null) _editorBase.IsVisible = true;
+                            }
+                        });
+                    }
+                    else
+                    {
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            BaseFileDocument.Text = $"No HEAD version available: {errImg}";
+                            if (_imageBase != null) { _imageBase.IsVisible = false; _imageBase.Source = null; }
+                            if (_editorBase != null) _editorBase.IsVisible = true;
+                        });
+                    }
 
-                // Compute diff sets for gutters
-                var (dok, baseDeleted, currentAdded, derr) = Services.GitHelper.TryGetLineDiffSets(_selectedFilePath!);
-                if (_baseDiffRenderer != null)
-                {
-                    _baseDiffRenderer.Update(null, dok ? baseDeleted : new System.Collections.Generic.HashSet<int>());
+                    // Skip text diff for images
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        if (_baseDiffRenderer != null) _baseDiffRenderer.Update(null, new System.Collections.Generic.HashSet<int>());
+                        if (_currentDiffRenderer != null) _currentDiffRenderer.Update(new System.Collections.Generic.HashSet<int>(), null);
+                    });
                 }
-                if (_currentDiffRenderer != null)
+                else
                 {
-                    _currentDiffRenderer.Update(dok ? currentAdded : new System.Collections.Generic.HashSet<int>(), null);
+                    var (ok, content, error) = Services.GitHelper.TryReadTextAtHead(_selectedFilePath!);
+                    var text = ok ? (content ?? string.Empty) : $"No HEAD version available: {error}";
+                    if (Dispatcher.UIThread.CheckAccess()) BaseFileDocument.Text = text;
+                    else Dispatcher.UIThread.Post(() => BaseFileDocument.Text = text);
+
+                    // Compute diff sets for gutters
+                    var (dok, baseDeleted, currentAdded, derr) = Services.GitHelper.TryGetLineDiffSets(_selectedFilePath!);
+                    if (_baseDiffRenderer != null)
+                    {
+                        _baseDiffRenderer.Update(null, dok ? baseDeleted : new System.Collections.Generic.HashSet<int>());
+                    }
+                    if (_currentDiffRenderer != null)
+                    {
+                        _currentDiffRenderer.Update(dok ? currentAdded : new System.Collections.Generic.HashSet<int>(), null);
+                    }
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        _editorBase?.TextArea.TextView.InvalidateLayer(KnownLayer.Background);
+                        _editorCurrent2?.TextArea.TextView.InvalidateLayer(KnownLayer.Background);
+                        if (_imageBase != null) { _imageBase.IsVisible = false; _imageBase.Source = null; }
+                        if (_editorBase != null) _editorBase.IsVisible = true;
+                        if (_imageCurrent2 != null && _imageCurrent2.IsVisible)
+                        {
+                            _imageCurrent2.IsVisible = false; _imageCurrent2.Source = null;
+                            if (_editorCurrent2 != null) _editorCurrent2.IsVisible = true;
+                        }
+                    });
                 }
-                Dispatcher.UIThread.Post(() =>
-                {
-                    _editorBase?.TextArea.TextView.InvalidateLayer(KnownLayer.Background);
-                    _editorCurrent2?.TextArea.TextView.InvalidateLayer(KnownLayer.Background);
-                });
             }
             catch (Exception ex)
             {
@@ -872,6 +1053,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 else Dispatcher.UIThread.Post(() => BaseFileDocument.Text = $"Failed to read from git: {ex.Message}");
             }
         });
+    }
+
+    private static bool IsImagePath(string path)
+    {
+        try
+        {
+            var ext = Path.GetExtension(path).ToLowerInvariant();
+            switch (ext)
+            {
+                case ".png":
+                case ".jpg":
+                case ".jpeg":
+                case ".gif":
+                case ".bmp":
+                case ".ico":
+                case ".tif":
+                case ".tiff":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        catch { return false; }
     }
 
     private void RefreshEditorPanelsVisibility()
@@ -945,6 +1149,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _editorBase ??= this.FindControl<TextEditor>("EditorBase");
             _editorCurrent ??= this.FindControl<TextEditor>("EditorCurrent");
             _editorCurrent2 ??= this.FindControl<TextEditor>("EditorCurrent2");
+            _imageBase ??= this.FindControl<Image>("ImageBase");
+            _imageCurrent ??= this.FindControl<Image>("ImageCurrent");
+            _imageCurrent2 ??= this.FindControl<Image>("ImageCurrent2");
 
             _editorRegistryOptions ??= new RegistryOptions(ThemeName.DarkPlus);
 
@@ -990,20 +1197,30 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void EnsureScrollSyncHandlers()
     {
-        if (_scrollHandlersAttached) return;
+        // Disabled: remove any existing sync handlers so panes scroll independently
+        RemoveScrollSyncHandlers();
+    }
+
+    private void RemoveScrollSyncHandlers()
+    {
         try
         {
             if (_editorBase?.TextArea?.TextView is { } vb)
-            {
-                vb.VisualLinesChanged += OnEditorBaseVisualLinesChanged;
-            }
+                vb.VisualLinesChanged -= OnEditorBaseVisualLinesChanged;
             if (_editorCurrent2?.TextArea?.TextView is { } vc)
-            {
-                vc.VisualLinesChanged += OnEditorCurrent2VisualLinesChanged;
-            }
-            _scrollHandlersAttached = true;
+                vc.VisualLinesChanged -= OnEditorCurrent2VisualLinesChanged;
+
+            _editorBase?.RemoveHandler(InputElement.PointerWheelChangedEvent, OnEditorBaseWheel);
+            _editorCurrent2?.RemoveHandler(InputElement.PointerWheelChangedEvent, OnEditorCurrent2Wheel);
+            _editorBase?.RemoveHandler(InputElement.PointerPressedEvent, OnEditorBasePointerPressed);
+            _editorCurrent2?.RemoveHandler(InputElement.PointerPressedEvent, OnEditorCurrent2PointerPressed);
+            if (_editorBase != null) _editorBase.GotFocus -= OnEditorBaseGotFocus;
+            if (_editorCurrent2 != null) _editorCurrent2.GotFocus -= OnEditorCurrent2GotFocus;
         }
         catch { }
+        _scrollHandlersAttached = false;
+        _suppressScrollSync = false;
+        _scrollMaster = ScrollMaster.None;
     }
 
     private void OnEditorBaseVisualLinesChanged(object? sender, EventArgs e)
@@ -1011,6 +1228,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (!IsCompareMode) return;
         if (_suppressScrollSync) return;
         if (_editorBase is null || _editorCurrent2 is null) return;
+        if (_scrollMaster != ScrollMaster.Base) return;
         var top = GetTopVisibleLine(_editorBase);
         if (top <= 0) return;
         _suppressScrollSync = true;
@@ -1024,6 +1242,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (!IsCompareMode) return;
         if (_suppressScrollSync) return;
         if (_editorBase is null || _editorCurrent2 is null) return;
+        if (_scrollMaster != ScrollMaster.Current) return;
         var top = GetTopVisibleLine(_editorCurrent2);
         if (top <= 0) return;
         _suppressScrollSync = true;
@@ -1044,6 +1263,55 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         catch { }
         return -1;
+    }
+
+    // Pointer wheel sync for more responsive coupling
+    private void OnEditorBaseWheel(object? sender, PointerWheelEventArgs e)
+    {
+        if (!IsCompareMode) return;
+        if (_suppressScrollSync) return;
+        if (_editorBase is null || _editorCurrent2 is null) return;
+        _scrollMaster = ScrollMaster.Base;
+        var top = GetTopVisibleLine(_editorBase);
+        if (top <= 0) return;
+        _suppressScrollSync = true;
+        try { _editorCurrent2.ScrollTo(top, 0); }
+        catch { }
+        finally { Dispatcher.UIThread.Post(() => _suppressScrollSync = false); }
+    }
+
+    private void OnEditorCurrent2Wheel(object? sender, PointerWheelEventArgs e)
+    {
+        if (!IsCompareMode) return;
+        if (_suppressScrollSync) return;
+        if (_editorBase is null || _editorCurrent2 is null) return;
+        _scrollMaster = ScrollMaster.Current;
+        var top = GetTopVisibleLine(_editorCurrent2);
+        if (top <= 0) return;
+        _suppressScrollSync = true;
+        try { _editorBase.ScrollTo(top, 0); }
+        catch { }
+        finally { Dispatcher.UIThread.Post(() => _suppressScrollSync = false); }
+    }
+
+    private void OnEditorBasePointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        _scrollMaster = ScrollMaster.Base;
+    }
+
+    private void OnEditorCurrent2PointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        _scrollMaster = ScrollMaster.Current;
+    }
+
+    private void OnEditorBaseGotFocus(object? sender, GotFocusEventArgs e)
+    {
+        _scrollMaster = ScrollMaster.Base;
+    }
+
+    private void OnEditorCurrent2GotFocus(object? sender, GotFocusEventArgs e)
+    {
+        _scrollMaster = ScrollMaster.Current;
     }
 
     private void OnEditorPaneSizeChanged(object? sender, SizeChangedEventArgs e)
@@ -1199,7 +1467,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             Command = _cli.Command,
             AdditionalArgs = _cli.AdditionalArgs,
-            AutoApproveEnabled = _settings.AutoApproveEnabled
+            VerboseLoggingEnabled = _verboseLogging
         };
         dialog.DataContext = vm;
         var result = await dialog.ShowDialog<CliSettings?>(this);
@@ -1210,10 +1478,312 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // persist settings
         _settings.Command = _cli.Command;
         _settings.AdditionalArgs = _cli.AdditionalArgs;
-        _settings.AutoApproveEnabled = result.AutoApproveEnabled;
+        _settings.VerboseLoggingEnabled = result.VerboseLoggingEnabled;
         SettingsService.Save(_settings);
         _currentModel = TryExtractModelFromArgs(_cli.AdditionalArgs);
-        _autoApproveEnabled = result.AutoApproveEnabled;
+        _verboseLogging = result.VerboseLoggingEnabled;
+    }
+
+    // Shell flyout handlers
+    private void OnOpenShellClick(object? sender, RoutedEventArgs e)
+    {
+        IsShellPanelOpen = true;
+        UpdateShellPanelPosition();
+        // focus the input shortly after showing
+        Dispatcher.UIThread.Post(() =>
+        {
+            try { this.FindControl<TextBox>("ShellInputTextBox")?.Focus(); } catch { }
+        });
+    }
+    private async void OnRunShellClick(object? sender, RoutedEventArgs e)
+    {
+        var tb = this.FindControl<TextBox>("ShellInputTextBox");
+        var cmd = tb?.Text ?? string.Empty;
+        var trimmed = cmd.Trim();
+        if (string.Equals(trimmed, "exit", StringComparison.OrdinalIgnoreCase))
+        {
+            IsShellPanelOpen = false;
+            try { tb!.Text = string.Empty; } catch { }
+            return;
+        }
+        if (TryHandleShellBuiltins(cmd))
+        {
+            try { tb!.Text = string.Empty; } catch { }
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(cmd)) return;
+        AddShellHistory(cmd);
+        _shellHistoryIndex = -1;
+        await RunShellCommandAsync(cmd);
+        try { tb!.Text = string.Empty; } catch { }
+    }
+
+    private void OnCloseShellClick(object? sender, RoutedEventArgs e)
+    {
+        IsShellPanelOpen = false;
+    }
+
+    private async void OnShellInputKeyDown(object? sender, KeyEventArgs e)
+    {
+        var tb = sender as TextBox;
+        if (e.Key == Key.Up)
+        {
+            e.Handled = true;
+            NavigateShellHistory(tb, -1);
+            return;
+        }
+        if (e.Key == Key.Down)
+        {
+            e.Handled = true;
+            NavigateShellHistory(tb, +1);
+            return;
+        }
+        if (e.Key == Key.Enter && !e.KeyModifiers.HasFlag(KeyModifiers.Shift))
+        {
+            e.Handled = true;
+            var cmd = tb?.Text ?? string.Empty;
+            var trimmed = cmd.Trim();
+            if (string.Equals(trimmed, "exit", StringComparison.OrdinalIgnoreCase))
+            {
+                IsShellPanelOpen = false;
+                try { if (tb != null) tb.Text = string.Empty; } catch { }
+                return;
+            }
+            if (TryHandleShellBuiltins(cmd))
+            {
+                try { if (tb != null) tb.Text = string.Empty; } catch { }
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(cmd)) return;
+            AddShellHistory(cmd);
+            _shellHistoryIndex = -1;
+            await RunShellCommandAsync(cmd);
+            try { tb!.Text = string.Empty; } catch { }
+        }
+    }
+
+    private async Task RunShellCommandAsync(string command)
+    {
+        var cwd = _shellCwd ?? CurrentWorkspacePath;
+        if (string.IsNullOrWhiteSpace(cwd) || !Directory.Exists(cwd))
+        {
+            AppendCliLog("System: No workspace selected; cannot run shell command.");
+            return;
+        }
+
+        if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
+        AppendCliLog("Shell:");
+        AppendCliLog($"{cwd}$ {command}");
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                WorkingDirectory = cwd,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            if (OperatingSystem.IsWindows())
+            {
+                // Use PowerShell on Windows
+                psi.FileName = "powershell"; // falls back to Windows PowerShell if pwsh not present
+                var psCmd = command.Replace("`", "``").Replace("\"", "`\"");
+                // -Command "& { <cmd> }" — allows arbitrary pipeline/script syntax
+                psi.Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"& {{ {psCmd} }}\"";
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                // Use zsh on macOS (default login shell)
+                psi.FileName = "/bin/zsh";
+                psi.Arguments = "-lc \"" + command.Replace("\"", "\\\"") + "\"";
+            }
+            else
+            {
+                // Linux: use bash
+                psi.FileName = "/bin/bash";
+                psi.Arguments = "-lc \"" + command.Replace("\"", "\\\"") + "\"";
+            }
+
+            using var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            p.OutputDataReceived += (_, ev) => { if (!string.IsNullOrEmpty(ev.Data)) AppendCliInline(ev.Data + Environment.NewLine); };
+            p.ErrorDataReceived += (_, ev) => { if (!string.IsNullOrEmpty(ev.Data)) AppendCliInline(ev.Data + Environment.NewLine); };
+            p.Start();
+            p.BeginOutputReadLine();
+            p.BeginErrorReadLine();
+            await p.WaitForExitAsync();
+            AppendCliLog($"System: (shell exit {p.ExitCode})");
+        }
+        catch (Exception ex)
+        {
+            AppendCliLog("System: Shell error: " + ex.Message);
+        }
+    }
+
+    private bool _isShellPanelOpen;
+    public bool IsShellPanelOpen
+    {
+        get => _isShellPanelOpen;
+        set
+        {
+            if (_isShellPanelOpen == value) return;
+            _isShellPanelOpen = value;
+            OnPropertyChanged();
+            if (value) UpdateShellPanelPosition();
+        }
+    }
+
+    private string? _shellCwd;
+    private string? _shellPrevCwd;
+
+    private bool TryHandleShellBuiltins(string command)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(command)) return false;
+            var trimmed = command.Trim();
+            if (!trimmed.StartsWith("cd", StringComparison.OrdinalIgnoreCase)) return false;
+
+            // Echo the command like a real shell
+            var cwdEcho = _shellCwd ?? CurrentWorkspacePath ?? string.Empty;
+            if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
+            AppendCliLog("Shell:");
+            AppendCliLog($"{cwdEcho}$ {command}");
+
+            // Parse path argument
+            var rest = trimmed.Length > 2 ? trimmed.Substring(2) : string.Empty; // after 'cd'
+            var arg = rest.Trim();
+            string target;
+            if (string.IsNullOrEmpty(arg))
+            {
+                target = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            }
+            else if (arg == "-")
+            {
+                // Toggle to previous directory
+                if (string.IsNullOrEmpty(_shellPrevCwd))
+                {
+                    AppendCliLog("System: cd: OLDPWD not set");
+                    return true;
+                }
+                target = _shellPrevCwd!;
+            }
+            else
+            {
+                // Strip surrounding quotes
+                if ((arg.StartsWith("\"") && arg.EndsWith("\"")) || (arg.StartsWith("'") && arg.EndsWith("'")))
+                    arg = arg.Substring(1, arg.Length - 2);
+
+                // Expand ~ and environment variables
+                if (arg.StartsWith("~"))
+                {
+                    var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                    arg = Path.Combine(home, arg.Substring(1).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                }
+                arg = Environment.ExpandEnvironmentVariables(arg);
+
+                // Resolve relative to current shell cwd
+                var baseDir = _shellCwd ?? CurrentWorkspacePath ?? Directory.GetCurrentDirectory();
+                target = Path.IsPathRooted(arg) ? arg : Path.GetFullPath(Path.Combine(baseDir, arg));
+            }
+
+            if (Directory.Exists(target))
+            {
+                // Update previous and current cwd, enabling 'cd -'
+                var old = _shellCwd ?? CurrentWorkspacePath ?? Directory.GetCurrentDirectory();
+                _shellPrevCwd = old;
+                _shellCwd = Path.GetFullPath(target);
+                OnPropertyChanged(nameof(ShellPromptPath));
+                AppendCliLog($"System: (cd) now in '{_shellCwd}'");
+            }
+            else
+            {
+                AppendCliLog($"System: cd: no such directory: {target}");
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppendCliLog("System: cd error: " + ex.Message);
+            return true; // considered handled
+        }
+    }
+    // Shell command history (session-scoped)
+    private readonly System.Collections.Generic.List<string> _shellHistory = new();
+    private int _shellHistoryIndex = -1; // -1 means not navigating; otherwise index into _shellHistory
+
+    private void AddShellHistory(string cmd)
+    {
+        try
+        {
+            cmd = cmd.Trim();
+            if (string.IsNullOrEmpty(cmd)) return;
+            // Avoid duplicate consecutive entries
+            if (_shellHistory.Count == 0 || !string.Equals(_shellHistory[^1], cmd, StringComparison.Ordinal))
+            {
+                _shellHistory.Add(cmd);
+                // Optional cap to avoid unbounded growth
+                const int Max = 200;
+                if (_shellHistory.Count > Max)
+                {
+                    _shellHistory.RemoveRange(0, _shellHistory.Count - Max);
+                }
+            }
+        }
+        catch { }
+    }
+
+    private void NavigateShellHistory(TextBox? tb, int direction)
+    {
+        if (tb is null) return;
+        if (_shellHistory.Count == 0) return;
+
+        if (direction < 0)
+        {
+            if (_shellHistoryIndex == -1) _shellHistoryIndex = _shellHistory.Count - 1;
+            else if (_shellHistoryIndex > 0) _shellHistoryIndex--;
+        }
+        else if (direction > 0)
+        {
+            if (_shellHistoryIndex == -1) return;
+            if (_shellHistoryIndex < _shellHistory.Count - 1) _shellHistoryIndex++;
+            else { _shellHistoryIndex = -1; tb.Text = string.Empty; return; }
+        }
+
+        if (_shellHistoryIndex >= 0 && _shellHistoryIndex < _shellHistory.Count)
+        {
+            tb.Text = _shellHistory[_shellHistoryIndex];
+            try { tb.CaretIndex = tb.Text?.Length ?? 0; } catch { }
+        }
+    }
+
+    private void OnRightPaneSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        UpdateShellPanelPosition();
+    }
+
+    private void UpdateShellPanelPosition()
+    {
+        try
+        {
+            if (!IsShellPanelOpen) return;
+            var right = this.FindControl<Grid>("RightPaneGrid");
+            var shell = this.FindControl<Border>("ShellPanel");
+            if (right == null || shell == null) return;
+            const double margin = 10.0;
+            // Fit the shell panel to the width of the CLI pane (minus margins)
+            var size = right.Bounds.Size;
+            double w = Math.Max(0, size.Width - (margin * 2));
+            double h = shell.Height; // fixed height
+            shell.Width = w;
+            double left = margin;
+            double top = Math.Max(0, size.Height - h - margin);
+            Canvas.SetLeft(shell, left);
+            Canvas.SetTop(shell, top);
+        }
+        catch { }
     }
 
     private async void OnSendCliInputClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -1221,9 +1791,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void OnCliInputKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Enter)
+        // Enter/Return sends; Shift+Enter inserts newline (AcceptsReturn=true)
+        bool isEnter = e.Key == Key.Enter || e.Key == Key.Return;
+        if (isEnter && !e.KeyModifiers.HasFlag(KeyModifiers.Shift))
         {
             e.Handled = true;
+            // Ensure we capture the latest text from the TextBox even if binding hasn't updated yet
+            if (sender is TextBox tb)
+            {
+                CliInput = tb.Text ?? string.Empty;
+            }
             await SendCliInputAsync();
         }
     }
@@ -1307,6 +1884,32 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         else
         {
             AppendCliLog("Git checkout failed: " + (error ?? "unknown error"));
+        }
+    }
+
+    private async void OnGitRollbackClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (!HasWorkspace || CurrentWorkspacePath is null || !IsGitRepo) return;
+        var confirm = new Views.ConfirmDialog
+        {
+            Title = "Rollback Changes",
+            Message = "This will discard ALL local changes and delete untracked files to match HEAD.\nThis action cannot be undone. Continue?"
+        };
+        var ok = await confirm.ShowDialog<bool>(this);
+        if (!ok) return;
+
+        AppendCliLog("Rolling back working directory…");
+        var (rok, output, error) = GitHelper.TryRollbackAllChanges(CurrentWorkspacePath);
+        if (rok)
+        {
+            AppendCliLog(output ?? "Rollback complete.");
+            RefreshGitUi();
+            if (HasWorkspace && CurrentWorkspacePath is not null)
+                LoadTree(CurrentWorkspacePath);
+        }
+        else
+        {
+            AppendCliLog("Git rollback failed: " + (error ?? "unknown error"));
         }
     }
 
@@ -1395,4 +1998,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         catch { }
         return null;
     }
+
+    
 }
