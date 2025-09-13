@@ -214,6 +214,75 @@ public static class GitHelper
         }
     }
 
+    public static (bool Ok, string? Output, string? Error) TryRollbackAllChanges(string path)
+    {
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(path);
+            if (string.IsNullOrEmpty(repoRoot)) return (false, null, "Not a git repository");
+
+            using var repo = new Repository(repoRoot!);
+
+            int untrackedDeleted = 0;
+
+            // If there is a HEAD commit, perform a hard reset to discard staged + unstaged changes
+            var head = repo.Head?.Tip;
+            if (head != null)
+            {
+                repo.Reset(ResetMode.Hard, head);
+            }
+            else
+            {
+                // No commits yet: best-effort cleanup — unstage everything
+                try { Commands.Unstage(repo, "*"); } catch { }
+            }
+
+            // Remove untracked files from working directory
+            try
+            {
+                var status = repo.RetrieveStatus(new StatusOptions
+                {
+                    IncludeUntracked = true,
+                    RecurseUntrackedDirs = true
+                });
+                foreach (var entry in status)
+                {
+                    var state = entry.State;
+                    // Treat new files in workdir as untracked/added
+                    if (state.HasFlag(FileStatus.NewInWorkdir))
+                    {
+                        var full = Path.Combine(repoRoot!, entry.FilePath.Replace('/', Path.DirectorySeparatorChar));
+                        try
+                        {
+                            if (File.Exists(full))
+                            {
+                                var attr = File.GetAttributes(full);
+                                if (attr.HasFlag(FileAttributes.ReadOnly))
+                                {
+                                    try { File.SetAttributes(full, attr & ~FileAttributes.ReadOnly); } catch { }
+                                }
+                                File.Delete(full);
+                                untrackedDeleted++;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+
+            var message = head != null
+                ? $"Rollback complete. Reset to {head.Sha[..7]}; deleted {untrackedDeleted} untracked file(s)."
+                : $"Rollback complete. No commits; deleted {untrackedDeleted} untracked file(s) and unstaged changes.";
+
+            return (true, message, null);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
     public static (bool Ok, string? Content, string? Error) TryReadTextAtHead(string filePath)
     {
         try
@@ -235,6 +304,34 @@ public static class GitHelper
             using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, true);
             var text = reader.ReadToEnd();
             return (true, text, null);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
+    public static (bool Ok, byte[]? Data, string? Error) TryReadBytesAtHead(string filePath)
+    {
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(filePath);
+            if (string.IsNullOrEmpty(repoRoot))
+                return (false, null, "Not a git repository");
+
+            var rel = Path.GetRelativePath(repoRoot!, filePath).Replace('\\', '/');
+            using var repo = new Repository(repoRoot!);
+            var head = repo.Head?.Tip;
+            if (head == null)
+                return (false, null, "No commits in repository");
+            var entry = head[rel];
+            if (entry == null || entry.TargetType != TreeEntryTargetType.Blob)
+                return (false, null, "File not tracked in HEAD");
+            var blob = (Blob)entry.Target;
+            using var stream = blob.GetContentStream();
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            return (true, ms.ToArray(), null);
         }
         catch (Exception ex)
         {

@@ -18,7 +18,7 @@
                 <TextBox Text="{Binding AdditionalArgs, Mode=TwoWay}"/>
                 <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Example: -c model=gpt-5-high"/>
             </StackPanel>
-            <CheckBox Content="Auto-approve tool/patch requests" IsChecked="{Binding AutoApproveEnabled, Mode=TwoWay}"/>
+            <CheckBox Content="Verbose logging (show suppressed content)" IsChecked="{Binding VerboseLoggingEnabled, Mode=TwoWay}"/>
         </StackPanel>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">

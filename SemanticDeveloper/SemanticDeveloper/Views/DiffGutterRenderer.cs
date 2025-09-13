@@ -47,8 +47,11 @@ public class DiffGutterRenderer : IBackgroundRenderer
 
             try
             {
-                using var _ = drawingContext.PushOpacity(0.22);
+                using var _ = drawingContext.PushOpacity(0.32);
                 drawingContext.FillRectangle(brush, rect);
+                // Solid inner bar for stronger cue
+                var bar = new Rect(left, y, Math.Min(3, GutterWidth), vline.Height);
+                drawingContext.FillRectangle(brush, bar);
             }
             catch { }
 

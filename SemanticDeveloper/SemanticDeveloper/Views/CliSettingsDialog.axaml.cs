@@ -7,7 +7,7 @@ public class CliSettings
 {
     public string Command { get; set; } = "codex";
     public string AdditionalArgs { get; set; } = string.Empty;
-    public bool AutoApproveEnabled { get; set; } = true;
+    public bool VerboseLoggingEnabled { get; set; } = false;
 }
 
 public partial class CliSettingsDialog : Window
