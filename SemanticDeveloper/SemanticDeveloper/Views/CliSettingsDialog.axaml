@@ -1,7 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="SemanticDeveloper.Views.CliSettingsDialog"
-        Width="520" Height="200"
+        Width="520" Height="400"
         CanResize="False"
         WindowStartupLocation="CenterOwner"
         x:CompileBindings="False"
@@ -19,6 +19,16 @@
                 <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Example: -c model=gpt-5-high"/>
             </StackPanel>
             <CheckBox Content="Verbose logging (show suppressed content)" IsChecked="{Binding VerboseLoggingEnabled, Mode=TwoWay}"/>
+            <Separator/>
+            <StackPanel>
+                <CheckBox Content="Use API Key for Codex CLI" IsChecked="{Binding UseApiKey, Mode=TwoWay}"/>
+                <TextBlock Text="API Key" Margin="0,8,0,4"/>
+                <TextBox Text="{Binding ApiKey, Mode=TwoWay}"
+                         PasswordChar="•"
+                         Watermark="Enter API key"
+                         ToolTip.Tip="Key will only be used if 'Use API Key' is checked"/>
+                <TextBlock Margin="0,6,0,0" Foreground="#888" FontSize="12" Text="Stored locally in settings.json. Leave blank to rely on system env."/>
+            </StackPanel>
         </StackPanel>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">

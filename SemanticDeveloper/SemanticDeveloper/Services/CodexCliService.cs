@@ -13,6 +13,8 @@ public class CodexCliService
     public bool UseProto => true;                   // Always use --proto for this app
     public string AdditionalArgs { get; set; } = string.Empty; // Extra CLI args if needed
     public bool IsRunning => _process is { HasExited: false };
+    public bool UseApiKey { get; set; } = false;
+    public string? ApiKey { get; set; }
 
     public event EventHandler<string>? OutputReceived;
     public event EventHandler? Exited;
@@ -39,6 +41,17 @@ public class CodexCliService
             UseShellExecute = false,
             CreateNoWindow = true
         };
+
+        // Inject API key env var when enabled
+        try
+        {
+            if (UseApiKey && !string.IsNullOrWhiteSpace(ApiKey))
+            {
+                // ProcessStartInfo.Environment is available on .NET 8
+                psi.Environment["OPENAI_API_KEY"] = ApiKey!;
+            }
+        }
+        catch { }
 
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
         p.OutputDataReceived += (_, e) => { if (e.Data != null) OutputReceived?.Invoke(this, e.Data); };

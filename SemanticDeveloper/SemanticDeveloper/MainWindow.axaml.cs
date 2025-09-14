@@ -62,6 +62,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public TextDocument BaseFileDocument { get; } = new TextDocument();
     private DiffGutterRenderer? _baseDiffRenderer;
     private DiffGutterRenderer? _currentDiffRenderer;
+    private DiffGutterRenderer? _singleDiffRenderer;
     private TextEditor? _editorBase;
     private TextEditor? _editorCurrent;
     private TextEditor? _editorCurrent2;
@@ -119,6 +120,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _settings = SettingsService.Load();
         _cli.Command = _settings.Command;
         _cli.AdditionalArgs = _settings.AdditionalArgs;
+        _cli.UseApiKey = _settings.UseApiKey;
+        _cli.ApiKey = string.IsNullOrWhiteSpace(_settings.ApiKey) ? null : _settings.ApiKey;
         AppendCliLog($"System: Loaded CLI settings: '{_cli.Command}' {_cli.AdditionalArgs}");
         _currentModel = TryExtractModelFromArgs(_cli.AdditionalArgs);
         _verboseLogging = _settings.VerboseLoggingEnabled;
@@ -184,6 +187,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _shellCwd = _currentWorkspacePath;
             _shellPrevCwd = null;
             OnPropertyChanged(nameof(ShellPromptPath));
+            // If no workspace is selected, reflect disconnected status
+            if (string.IsNullOrWhiteSpace(_currentWorkspacePath) || !Directory.Exists(_currentWorkspacePath))
+            {
+                SessionStatus = "disconnected";
+            }
         }
     }
 
@@ -300,7 +308,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private string _sessionStatus = "idle";
+    private string _sessionStatus = "disconnected";
     public string SessionStatus
     {
         get => _sessionStatus;
@@ -595,6 +603,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     {
                         try { LoadTree(CurrentWorkspacePath); } catch { }
                     }
+                    try { UpdateSingleDiffGutter(); } catch { }
                     return true;
                 }
             case "turn_diff":
@@ -916,6 +925,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     CurrentFileDocument.Text = text;
                 else
                     Dispatcher.UIThread.Post(() => CurrentFileDocument.Text = text);
+                UpdateSingleDiffGutter();
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
                     if (_imageCurrent != null) { _imageCurrent.IsVisible = false; _imageCurrent.Source = null; }
@@ -1119,8 +1129,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
             AppendCliLog($"System: Saved '{_selectedFilePath}'.");
 
-            // Refresh diff sets and base doc if compare is on
-            await RefreshBaseDocumentAsync();
+        // Refresh diff sets and base doc if compare is on
+        await RefreshBaseDocumentAsync();
+        // Refresh single-view gutter indicators
+        UpdateSingleDiffGutter();
 
             // Update git status for the saved file only (avoid repo-wide status scan)
             try
@@ -1177,6 +1189,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (_editorCurrent is not null)
             {
                 try { var inst = _editorCurrent.InstallTextMate(_editorRegistryOptions); } catch { }
+                if (_singleDiffRenderer == null)
+                {
+                    _singleDiffRenderer = new DiffGutterRenderer { ShowAdded = true };
+                    _editorCurrent.TextArea.TextView.BackgroundRenderers.Add(_singleDiffRenderer);
+                }
             }
 
             EnsureScrollSyncHandlers();
@@ -1380,6 +1397,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         catch { }
     }
 
+    private void UpdateSingleDiffGutter()
+    {
+        try
+        {
+            if (_singleDiffRenderer == null || string.IsNullOrWhiteSpace(_selectedFilePath)) return;
+            var (ok, baseDeleted, currentAdded, err) = Services.GitHelper.TryGetLineDiffSets(_selectedFilePath!);
+            _singleDiffRenderer.Update(ok ? currentAdded : new System.Collections.Generic.HashSet<int>(), null);
+            try { _editorCurrent?.TextArea?.TextView?.InvalidateLayer(KnownLayer.Background); } catch { }
+        }
+        catch { }
+    }
+
     private async Task RestartCliAsync()
     {
         if (!HasWorkspace || CurrentWorkspacePath is null)
@@ -1467,7 +1496,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             Command = _cli.Command,
             AdditionalArgs = _cli.AdditionalArgs,
-            VerboseLoggingEnabled = _verboseLogging
+            VerboseLoggingEnabled = _verboseLogging,
+            UseApiKey = _settings.UseApiKey,
+            ApiKey = _settings.ApiKey
         };
         dialog.DataContext = vm;
         var result = await dialog.ShowDialog<CliSettings?>(this);
@@ -1479,6 +1510,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _settings.Command = _cli.Command;
         _settings.AdditionalArgs = _cli.AdditionalArgs;
         _settings.VerboseLoggingEnabled = result.VerboseLoggingEnabled;
+        _settings.UseApiKey = result.UseApiKey;
+        _settings.ApiKey = result.ApiKey ?? string.Empty;
+        _cli.UseApiKey = _settings.UseApiKey;
+        _cli.ApiKey = string.IsNullOrWhiteSpace(_settings.ApiKey) ? null : _settings.ApiKey;
         SettingsService.Save(_settings);
         _currentModel = TryExtractModelFromArgs(_cli.AdditionalArgs);
         _verboseLogging = result.VerboseLoggingEnabled;

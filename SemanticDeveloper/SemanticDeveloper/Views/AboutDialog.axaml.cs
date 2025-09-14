@@ -144,4 +144,19 @@ public partial class AboutDialog : Window
     {
         Close();
     }
+
+    private void PoweredBy_OnPointerPressedLink_Click(object? sender, PointerPressedEventArgs e)
+    {
+        try
+        {
+            // Try to open the URL in the default browser
+            string url = "https://developers.openai.com/codex";
+            OpenUrl(url);
+        }
+        catch (Exception ex)
+        {
+            // Log the error but don't crash
+            Console.WriteLine($"Error opening URL: {ex.Message}");
+        }
+    }
 }

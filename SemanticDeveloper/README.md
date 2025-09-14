@@ -36,6 +36,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
    - `Command` (default: `codex`)
    - `Additional Arguments` (e.g., `--model=gpt-5-high` or `-c model=gpt-5-high`)
    - Verbose logging (show suppressed output)
+   - Use API Key for Codex CLI (stores and injects `OPENAI_API_KEY` when starting the CLI)
 
 5. The left file tree and right log pane are resizable using the vertical splitter between them.
 
