@@ -19,11 +19,6 @@
             <CheckBox Content="Verbose logging (show suppressed content)" IsChecked="{Binding VerboseLoggingEnabled, Mode=TwoWay}"/>
             <Separator/>
             <StackPanel>
-                <CheckBox Content="Enable MCP support (load servers from config)" IsChecked="{Binding McpEnabled, Mode=TwoWay}"/>
-                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Loads MCP servers from mcp_servers.json in your app data folder and passes them directly to Codex." MaxWidth="550" TextWrapping="Wrap"/>
-            </StackPanel>
-            <Separator/>
-            <StackPanel>
                 <CheckBox Content="Use API Key for Codex CLI" IsChecked="{Binding UseApiKey, Mode=TwoWay}"/>
                 <TextBlock Text="API Key" Margin="0,8,0,4"/>
                 <TextBox Text="{Binding ApiKey, Mode=TwoWay}"
@@ -35,15 +30,16 @@
             </StackPanel>
             <Separator/>
             <StackPanel>
-                <CheckBox Content="Allow network access for tools (MCP, web fetches)" IsChecked="{Binding AllowNetworkAccess, Mode=TwoWay}"/>
-                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Enables outbound network for tool calls (e.g., MCP servers) by setting sandbox_policy.network_access=true on turns." MaxWidth="550" TextWrapping="Wrap"/>
-            </StackPanel>
-            <Separator/>
-            <StackPanel>
-                <TextBlock Text="MCP Results" FontWeight="SemiBold"/>
-                <CheckBox Content="Show MCP results in log" IsChecked="{Binding ShowMcpResultsInLog, Mode=TwoWay}"/>
-                <CheckBox Content="Only show when not editing (auto)" IsChecked="{Binding ShowMcpResultsOnlyWhenNoEdits, Mode=TwoWay}"/>
-                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="When enabled, the app surfaces top results (titles + URLs) for search-like tools. During code-editing turns, it suppresses unless disabled." MaxWidth="550" TextWrapping="Wrap"/>
+                <CheckBox Content="Enable MCP support (load servers from config)" IsChecked="{Binding McpEnabled, Mode=TwoWay}"/>
+                <TextBlock Margin="0,4,0,6" Foreground="#888" FontSize="12" Text="Loads MCP servers from mcp_servers.json in your app data folder and passes them directly to Codex." MaxWidth="550" TextWrapping="Wrap"/>
+                <StackPanel IsEnabled="{Binding McpEnabled}">
+                    <CheckBox Content="Allow network access for tools (MCP, web fetches)" IsChecked="{Binding AllowNetworkAccess, Mode=TwoWay}"/>
+                    <TextBlock Margin="0,4,0,6" Foreground="#888" FontSize="12" Text="Enables outbound network for tool calls (e.g., MCP servers) by setting sandbox_policy.network_access=true on turns." MaxWidth="550" TextWrapping="Wrap"/>
+                    <TextBlock Text="MCP Results" FontWeight="SemiBold"/>
+                    <CheckBox Content="Show MCP results in log" IsChecked="{Binding ShowMcpResultsInLog, Mode=TwoWay}"/>
+                    <CheckBox Content="Only show when not editing (auto)" IsChecked="{Binding ShowMcpResultsOnlyWhenNoEdits, Mode=TwoWay}"/>
+                    <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="When enabled, the app surfaces top results (titles + URLs) for search-like tools. During code-editing turns, it suppresses unless disabled." MaxWidth="550" TextWrapping="Wrap"/>
+                </StackPanel>
             </StackPanel>
             </StackPanel>
         </ScrollViewer>
