@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -33,7 +34,6 @@ public class CodexCliService
         var psi = new ProcessStartInfo
         {
             FileName = Command,
-            Arguments = BuildArguments(mode),
             WorkingDirectory = workspacePath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -42,16 +42,13 @@ public class CodexCliService
             CreateNoWindow = true
         };
 
-        // Inject API key env var when enabled
-        try
-        {
-            if (UseApiKey && !string.IsNullOrWhiteSpace(ApiKey))
-            {
-                // ProcessStartInfo.Environment is available on .NET 8
-                psi.Environment["OPENAI_API_KEY"] = ApiKey!;
-            }
-        }
-        catch { }
+        // Build argument tokens to avoid shell-quoting pitfalls
+        var tokens = BuildArgumentTokens(mode, AdditionalArgs);
+        foreach (var t in tokens)
+            psi.ArgumentList.Add(t);
+
+        // Do not inject API key via environment. Authentication is handled via an explicit
+        // 'codex login --api-key' flow before starting the proto session.
 
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
         p.OutputDataReceived += (_, e) => { if (e.Data != null) OutputReceived?.Invoke(this, e.Data); };
@@ -206,16 +203,46 @@ public class CodexCliService
         return (p.ExitCode, stdout, stderr);
     }
 
-    private string BuildArguments(ProtoMode mode)
+    private static List<string> BuildArgumentTokens(ProtoMode mode, string? additional)
     {
-        string args = mode switch
+        var tokens = new List<string>();
+        switch (mode)
         {
-            ProtoMode.Flag => "--proto",
-            ProtoMode.Subcommand => "proto",
-            _ => string.Empty
-        };
-        if (!string.IsNullOrWhiteSpace(AdditionalArgs))
-            args = string.IsNullOrEmpty(args) ? AdditionalArgs : $"{args} {AdditionalArgs}";
-        return args;
+            case ProtoMode.Flag: tokens.Add("--proto"); break;
+            case ProtoMode.Subcommand: tokens.Add("proto"); break;
+        }
+        if (!string.IsNullOrWhiteSpace(additional))
+        {
+            tokens.AddRange(SplitArgsRespectingQuotes(additional!));
+        }
+        return tokens;
+    }
+
+    private static IEnumerable<string> SplitArgsRespectingQuotes(string input)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(input)) return result;
+        var sb = new System.Text.StringBuilder();
+        bool inSingle = false, inDouble = false;
+        int bracketDepth = 0;
+        for (int i = 0; i < input.Length; i++)
+        {
+            char c = input[i];
+            if (c == '\'' && !inDouble) { inSingle = !inSingle; sb.Append(c); continue; }
+            if (c == '"' && !inSingle) { inDouble = !inDouble; sb.Append(c); continue; }
+            if (!inSingle && !inDouble)
+            {
+                if (c == '[') { bracketDepth++; sb.Append(c); continue; }
+                if (c == ']') { bracketDepth = Math.Max(0, bracketDepth - 1); sb.Append(c); continue; }
+                if (char.IsWhiteSpace(c) && bracketDepth == 0)
+                {
+                    if (sb.Length > 0) { result.Add(sb.ToString()); sb.Clear(); }
+                    continue;
+                }
+            }
+            sb.Append(c);
+        }
+        if (sb.Length > 0) result.Add(sb.ToString());
+        return result;
     }
 }

@@ -26,10 +26,11 @@ public static class ProtoHelper
         ContentStyle style = ContentStyle.Flattened,
         string defaultType = "user_input",
         string? model = null,
-        string? approvalPolicy = null)
+        string? approvalPolicy = null,
+        bool allowNetworkAccess = false)
     {
         // Build a proper Submission per protocol.rs: { id, op: { type, ... } }
-        var payload = BuildSubmissionFromText(input, cwd, defaultType, model, approvalPolicy);
+        var payload = BuildSubmissionFromText(input, cwd, defaultType, model, approvalPolicy, allowNetworkAccess);
         return (true, payload, string.Empty);
     }
 
@@ -49,8 +50,8 @@ public static class ProtoHelper
 
     // Wraps plain text into a minimal proto message envelope.
     // Default message type is "input".
-    public static string WrapPlainText(string text, string? cwd, SubmissionShape shape, ContentStyle style, string type = "user_input", string? model = null, string? approvalPolicy = null)
-        => BuildSubmissionFromText(text, cwd, type, model, approvalPolicy);
+    public static string WrapPlainText(string text, string? cwd, SubmissionShape shape, ContentStyle style, string type = "user_input", string? model = null, string? approvalPolicy = null, bool allowNetworkAccess = false)
+        => BuildSubmissionFromText(text, cwd, type, model, approvalPolicy, allowNetworkAccess);
 
     private static JObject NewSubmission()
     {
@@ -72,7 +73,7 @@ public static class ProtoHelper
         {
             if (!string.IsNullOrWhiteSpace(cwd) && inner["cwd"] == null) inner["cwd"] = cwd;
             EnsurePolicy(inner, null);
-            EnsureSandboxPolicy(inner);
+            EnsureSandboxPolicy(inner, null);
             EnsureEffort(inner);
             EnsureSummary(inner);
         }
@@ -85,18 +86,30 @@ public static class ProtoHelper
             o["approval_policy"] = value;
     }
 
-    private static void EnsureSandboxPolicy(JObject o)
+    private static void EnsureSandboxPolicy(JObject o, bool? allowNetwork)
     {
         var sp = o["sandbox_policy"];
         if (sp == null)
         {
-            o["sandbox_policy"] = new JObject { ["mode"] = "workspace-write" };
+            var obj = new JObject { ["mode"] = "workspace-write" };
+            if (allowNetwork.HasValue && allowNetwork.Value)
+                obj["network_access"] = true;
+            o["sandbox_policy"] = obj;
             return;
         }
         if (sp is JValue v && v.Type == JTokenType.String)
         {
             // Normalize string to object form expected by internally tagged enum
-            o["sandbox_policy"] = new JObject { ["mode"] = v.Value<string>() ?? "workspace-write" };
+            var obj = new JObject { ["mode"] = v.Value<string>() ?? "workspace-write" };
+            if (allowNetwork.HasValue && allowNetwork.Value)
+                obj["network_access"] = true;
+            o["sandbox_policy"] = obj;
+            return;
+        }
+        if (sp is JObject so && allowNetwork.HasValue)
+        {
+            if (allowNetwork.Value)
+                so["network_access"] = true;
         }
     }
 
@@ -231,7 +244,15 @@ public static class ProtoHelper
         return sub.ToString(Formatting.None);
     }
 
-    private static string BuildSubmissionFromText(string text, string? cwd, string type, string? model, string? approvalPolicy)
+    public static string BuildListMcpTools()
+    {
+        var sub = NewSubmission();
+        var op = (JObject)sub["op"]!;
+        op["type"] = "list_mcp_tools";
+        return sub.ToString(Formatting.None);
+    }
+
+    private static string BuildSubmissionFromText(string text, string? cwd, string type, string? model, string? approvalPolicy, bool allowNetwork)
     {
         var sub = NewSubmission();
         var op = (JObject)sub["op"]!;
@@ -242,7 +263,7 @@ public static class ProtoHelper
             op["items"] = new JArray(new JObject { ["type"] = "text", ["text"] = text });
             if (!string.IsNullOrWhiteSpace(cwd)) op["cwd"] = cwd;
             EnsurePolicy(op, approvalPolicy);
-            EnsureSandboxPolicy(op);
+            EnsureSandboxPolicy(op, allowNetwork);
             EnsureEffort(op);
             EnsureSummary(op);
             EnsureModel(op, model);

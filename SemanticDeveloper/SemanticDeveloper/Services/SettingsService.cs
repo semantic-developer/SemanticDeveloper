@@ -25,12 +25,24 @@ public static class SettingsService
             if (path != null)
             {
                 var json = File.ReadAllText(path);
-                var settings = JsonConvert.DeserializeObject<AppSettings>(json);
-                if (settings != null)
+                var settings = JsonConvert.DeserializeObject<AppSettings>(json) ?? new AppSettings();
+                // Backward‑compat: if AllowNetworkAccess is missing in stored JSON, default it to true
+                try
                 {
-                    _loadedPath = path;
-                    return settings;
+                    var obj = JsonConvert.DeserializeObject<Newtonsoft.Json.Linq.JObject>(json);
+                    bool hasAllow = obj != null && obj.Property("AllowNetworkAccess") != null;
+                    if (!hasAllow)
+                    {
+                        settings.AllowNetworkAccess = true;
+                    }
+                    if (obj != null && obj.Property("ShowMcpResultsInLog") == null)
+                        settings.ShowMcpResultsInLog = true;
+                    if (obj != null && obj.Property("ShowMcpResultsOnlyWhenNoEdits") == null)
+                        settings.ShowMcpResultsOnlyWhenNoEdits = true;
                 }
+                catch { }
+                _loadedPath = path;
+                return settings;
             }
         }
         catch { }
