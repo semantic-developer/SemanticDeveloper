@@ -25,16 +25,25 @@
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     </ItemGroup>
 
-    <ItemGroup>
+  <ItemGroup>
       <Folder Include="Images\" />
-    </ItemGroup>
+  </ItemGroup>
 
-    <ItemGroup>
+  <ItemGroup>
       <None Remove="Images\semantic-developer-logo.png" />
       <AvaloniaResource Include="Images\semantic-developer-logo.png" />
       <None Remove="Images\semantic-developer-logo-large.png" />
       <AvaloniaResource Include="Images\semantic-developer-logo-large.png" />
       <None Remove="Images\SemanticDeveloperLogo.ico" />
       <AvaloniaResource Include="Images\SemanticDeveloperLogo.ico" />
-    </ItemGroup>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="README.md" />
+    <Content Include="README.md">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!-- MCP mux removed; servers are loaded directly by Codex via config flags. -->
 </Project>

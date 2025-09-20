@@ -1,24 +1,27 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="SemanticDeveloper.Views.CliSettingsDialog"
-        Width="520" Height="400"
+        Width="580" Height="400"
         CanResize="False"
         WindowStartupLocation="CenterOwner"
         x:CompileBindings="False"
         Title="CLI Settings"
+        Background="#2E2E2E"
         Icon="avares://SemanticDeveloper/Images/semantic-developer-logo-large.png">
-    <Grid RowDefinitions="*,Auto" Margin="16" RowSpacing="12">
-        <StackPanel Spacing="10">
+    <Grid RowDefinitions="*,Auto" Margin="16" RowSpacing="12" MaxWidth="550">
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" MaxWidth="550">
+            <StackPanel Spacing="10">
             <StackPanel>
-                <TextBlock Text="Command" Margin="0,0,0,4"/>
-                <TextBox Text="{Binding Command, Mode=TwoWay}"/>
-            </StackPanel>
-            <StackPanel>
-                <TextBlock Text="Additional Arguments" Margin="0,0,0,4"/>
-                <TextBox Text="{Binding AdditionalArgs, Mode=TwoWay}"/>
-                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Example: -c model=gpt-5-high"/>
+                <TextBlock Text="Profile" Margin="0,0,0,4"/>
+                <ComboBox ItemsSource="{Binding Profiles}" SelectedItem="{Binding SelectedProfile, Mode=TwoWay}" MaxWidth="550"/>
+                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Profiles from config.toml (e.g., ~/.codex/config.toml)." MaxWidth="550" TextWrapping="Wrap"/>
             </StackPanel>
             <CheckBox Content="Verbose logging (show suppressed content)" IsChecked="{Binding VerboseLoggingEnabled, Mode=TwoWay}"/>
+            <Separator/>
+            <StackPanel>
+                <CheckBox Content="Enable MCP support (load servers from config)" IsChecked="{Binding McpEnabled, Mode=TwoWay}"/>
+                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Loads MCP servers from mcp_servers.json in your app data folder and passes them directly to Codex." MaxWidth="550" TextWrapping="Wrap"/>
+            </StackPanel>
             <Separator/>
             <StackPanel>
                 <CheckBox Content="Use API Key for Codex CLI" IsChecked="{Binding UseApiKey, Mode=TwoWay}"/>
@@ -26,10 +29,24 @@
                 <TextBox Text="{Binding ApiKey, Mode=TwoWay}"
                          PasswordChar="•"
                          Watermark="Enter API key"
-                         ToolTip.Tip="Key will only be used if 'Use API Key' is checked"/>
-                <TextBlock Margin="0,6,0,0" Foreground="#888" FontSize="12" Text="Stored locally in settings.json. Leave blank to rely on system env."/>
+                         ToolTip.Tip="When enabled, the app runs 'codex login --api-key &lt;key&gt;' before sessions"
+                         MaxWidth="550"/>
+                <TextBlock Margin="0,6,0,0" Foreground="#888" FontSize="12" Text="Stored in settings.json. When enabled, the app authenticates with your key and does not rely on existing CLI login." MaxWidth="550" TextWrapping="Wrap"/>
             </StackPanel>
-        </StackPanel>
+            <Separator/>
+            <StackPanel>
+                <CheckBox Content="Allow network access for tools (MCP, web fetches)" IsChecked="{Binding AllowNetworkAccess, Mode=TwoWay}"/>
+                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Enables outbound network for tool calls (e.g., MCP servers) by setting sandbox_policy.network_access=true on turns." MaxWidth="550" TextWrapping="Wrap"/>
+            </StackPanel>
+            <Separator/>
+            <StackPanel>
+                <TextBlock Text="MCP Results" FontWeight="SemiBold"/>
+                <CheckBox Content="Show MCP results in log" IsChecked="{Binding ShowMcpResultsInLog, Mode=TwoWay}"/>
+                <CheckBox Content="Only show when not editing (auto)" IsChecked="{Binding ShowMcpResultsOnlyWhenNoEdits, Mode=TwoWay}"/>
+                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="When enabled, the app surfaces top results (titles + URLs) for search-like tools. During code-editing turns, it suppresses unless disabled." MaxWidth="550" TextWrapping="Wrap"/>
+            </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
             <Button Width="96" Click="OnCancel">Cancel</Button>

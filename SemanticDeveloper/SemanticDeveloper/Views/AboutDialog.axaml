@@ -4,7 +4,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d" d:DesignWidth="400" d:DesignHeight="250"
         x:Class="SemanticDeveloper.Views.AboutDialog"
-        Width="400" 
+        Width="420" 
         Height="420"
         WindowStartupLocation="CenterOwner"
         CanResize="False"

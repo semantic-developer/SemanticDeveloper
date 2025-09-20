@@ -5,8 +5,8 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
 - Select a workspace folder and browse files via a lazy file tree
 - Start a Codex session and stream assistant output in real time
 - Send user input that is wrapped as protocol `Submission`s (proto)
-- Auto‑approve exec/patch requests (toggleable)
-- Configure CLI command and additional args
+- Auto‑approve exec/patch requests (automatic)
+- Select a Codex profile (from `config.toml`) and load MCP servers from a JSON config
 – See live token usage and estimated context remaining in the header
 
 > Important: This app always runs Codex in proto mode via the `proto` subcommand.
@@ -33,10 +33,56 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
 2. Click “Restart Session” to launch `codex proto` in the workspace directory (a session also starts automatically after you select a workspace).
 3. Type into the input box and press Enter to send. Output appears in the right panel.
 4. “CLI Settings” lets you change:
-   - `Command` (default: `codex`)
-   - `Additional Arguments` (e.g., `--model=gpt-5-high` or `-c model=gpt-5-high`)
+   - Profile (from Codex `config.toml`) — passed via `-c profile=<name>`
+     - `config.toml` path: `$CODEX_HOME/config.toml` (defaults to `~/.codex/config.toml`)
    - Verbose logging (show suppressed output)
-   - Use API Key for Codex CLI (stores and injects `OPENAI_API_KEY` when starting the CLI)
+   - Enable MCP support (loads MCP servers from your JSON config and passes them directly to Codex)
+     - Config path: `~/.config/SemanticDeveloper/mcp_servers.json` (Linux/macOS) or `%AppData%/SemanticDeveloper/mcp_servers.json` (Windows)
+  - Use API Key for Codex CLI (runs `codex login --api-key <key>` before sessions; does not rely on existing CLI auth)
+  - Allow network access for tools (sets sandbox_policy.network_access=true on turns so MCP tools can reach the network)
+  - Without API key enabled, the app proactively authenticates with `codex auth login` (falling back to `codex login`) before sessions so your chat/GPT token is used.
+
+### Profiles (config.toml) example
+
+Example `config.toml` profiles:
+
+```toml
+[profiles.gpt-5-high]
+model = "gpt-5"
+model_provider = "openai"
+approval_policy = "never"
+model_reasoning_effort = "high"
+model_reasoning_summary = "auto"
+
+[profiles.gpt-5-medium]
+model = "gpt-5"
+model_provider = "openai"
+approval_policy = "never"
+model_reasoning_effort = "medium"
+model_reasoning_summary = "auto"
+
+[profiles.gpt-5-low]
+model = "gpt-5"
+model_provider = "openai"
+approval_policy = "never"
+model_reasoning_effort = "low"
+model_reasoning_summary = "auto"
+
+[profiles.gpt-5-codex-high]
+model = "gpt-5-codex"
+model_provider = "openai"
+approval_policy = "never"
+model_reasoning_effort = "high"
+model_reasoning_summary = "auto"
+
+[profiles.gpt-5-codex-medium]
+model = "gpt-5-codex"
+model_provider = "openai"
+approval_policy = "never"
+model_reasoning_effort = "medium"
+model_reasoning_summary = "auto"
+```
+
 
 5. The left file tree and right log pane are resizable using the vertical splitter between them.
 
@@ -111,17 +157,51 @@ Notes
 
 - Clear Log clears both the on‑screen log and the underlying editor document; it does not affect the session.
 
+## MCP Servers Panel
+
+- The left pane includes an MCP section below the file tree:
+  - Servers list: a checkbox per server from `mcp_servers.json`. Only selected servers are injected at session start.
+  - Tools list: after session starts, tools are grouped under their server names using short identifiers (the full identifier is available as a tooltip).
+  - Header buttons:
+    - ⚙ opens `mcp_servers.json` in your editor.
+    - ↻ reloads the config and updates the server list.
+- Only local stdio servers are supported (command/args/cwd/env). Remote transports (e.g., SSE) are not injected.
+
+Config file location:
+- Linux/macOS: `~/.config/SemanticDeveloper/mcp_servers.json`
+- Windows: `%AppData%/SemanticDeveloper/mcp_servers.json`
+
+Selection behavior:
+- The checkbox state in the MCP pane determines which servers are passed to Codex at session start.
+- Change selections, then click “Restart Session” to apply.
 ## Troubleshooting
 
 - “Failed to start 'codex'”: Ensure the CLI is installed and on `PATH`. Test with `codex --help` and `codex proto --help`.
-- Model selection: Provide a model via `Additional Arguments`, e.g., `--model=gpt-5-high`.
-  - If you pass a `-low`, `-medium`, or `-high` suffix (e.g., `gpt-5-high`), the app normalizes it to `model=gpt-5` + `effort=high` in the submission payload.
+- Model selection: Prefer using `config.toml` (via Profiles). You can set `model`, `model_provider`, and related options per the Codex docs.
 - Git init issues: The app uses LibGit2Sharp (no Git CLI needed). If the native lib fails to load, the app skips initialization. Commits use your configured name/email if available; otherwise a fallback signature is used.
+
+- Authentication:
+  - If you are not using an API key and the Codex CLI is not logged in (no `~/.codex/auth.json`), the proto stream returns 401. The app detects this and prompts to run `codex auth login` for you. Follow the browser flow; on success the app restarts the proto session automatically.
+  - If your CLI version doesn’t support `auth login`, the app falls back to `codex login`.
+  - When “Use API Key” is enabled in CLI Settings, the app attempts a non‑interactive `codex login --api-key <key>` before sessions and on 401. If login succeeds, it restarts the session automatically.
+
+## Run App
+
+- The bottom-right pane has a `Run App` button (next to Shell) that scans the workspace for common runnable targets and either runs the single best candidate or lets you choose among multiple options.
+- Detection heuristics (depth-limited, skipping heavy folders like `node_modules/`, `bin/`, `obj/`):
+  - Node: `package.json` with `dev` or `start` → prefers `yarn` (when `yarn.lock`), `pnpm` (when `pnpm-lock.yaml`), else `npm`. Builds first when a `build` script exists.
+  - .NET: `*.sln` and `*.csproj` → enumerates projects and runs `dotnet build` then `dotnet run --project <csproj>` for the selected one.
+  - Rust: `Cargo.toml` → builds with `cargo build` then runs `cargo run`.
+  - Python: `main.py` or `app.py` → `python3`/`python`.
+  - Go: `go.mod` → builds with `go build` then runs `go run .`.
+  - Java: `pom.xml` (Maven) → runs `mvn package` then runs the jar from `target/`. `build.gradle`/`gradlew` (Gradle) → `gradle build` then `gradle run`.
+  - HTML: `index.html` → opens in your default browser.
+- Output from commands streams into the log. For long-running dev servers, the process runs until you close it from its own console or terminate externally.
 
 ## Project Layout
 
 - `SemanticDeveloper/` — App source (UI, services, models). This README lives here.
-- `proto-reference/` — Rust protocol reference for Codex (not built by this project).
+- `proto-reference/` — Rust protocol reference for Codex (not built by this project). Includes MCP/client protocol shapes.
 
 ## Notes
 

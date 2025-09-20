@@ -1,0 +1,18 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="SemanticDeveloper.Views.SelectOptionDialog"
+        Width="520" Height="380"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Title="Select"
+        Icon="avares://SemanticDeveloper/Images/semantic-developer-logo-large.png">
+    <Grid RowDefinitions="Auto,*,Auto" Margin="16" RowSpacing="12">
+        <TextBlock x:Name="PromptText" TextWrapping="Wrap"/>
+        <ListBox Grid.Row="1" x:Name="OptionsList" SelectionMode="Single"/>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Width="96" Click="OnCancel">Cancel</Button>
+            <Button Width="96" Click="OnOk">OK</Button>
+        </StackPanel>
+    </Grid>
+</Window>
+
