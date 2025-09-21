@@ -105,6 +105,8 @@ The app integrates basic Git operations directly in the header. All actions use 
     - Stages all changes (`*`) and creates a commit with the provided message.
     - Uses your Git config for name/email if available; otherwise falls back to a local signature like `<user>@local`.
     - If there are no changes, you’ll get a friendly “No changes to commit.” notice.
+    - Automatically pushes the current branch to its tracked remote (defaults to `origin`).
+    - Optional: tick **Create Pull Request** to open your browser to a GitHub compare page after a successful push.
   - New Branch…
     - Creates and checks out a new branch based on the default branch when available.
     - Behavior details:
@@ -113,11 +115,21 @@ The app integrates basic Git operations directly in the header. All actions use 
       - Example log: `Created and checked out 'feature-x' (based on origin/main).`
   - Switch Branch…
     - Checks out an existing branch by name (no automatic fetch/merge).
+  - Get Latest
+    - Fetches from the tracked remote (defaults to `origin`) and fast-forwards the current branch when possible.
+    - Requires the branch to track a remote counterpart; otherwise a helpful log message is shown.
+    - Stops early if a merge or rebase would be required (fast-forward only).
   - Rollback Changes…
     - Hard‑resets the working directory to `HEAD` and deletes untracked files.
     - Prompts for confirmation since this discards local changes.
   - Refresh
     - Refreshes the branch label and the file tree’s Git status coloring.
+
+Example workflow
+1. Switch to an existing base branch (e.g., `main` or `master`).
+2. Choose **Git ▾ → Get Latest** to fast-forward your local branch.
+3. Use **Git ▾ → New Branch…** with your preferred naming convention (e.g., `feature/login-form`).
+4. After making changes, select **Commit…**, enter a message, let the app push the branch for you, and optionally enable **Create Pull Request** to jump straight to GitHub once the push completes.
 
 - Initialize Git…
   - When the workspace is not a Git repo, an “Initialize Git…” button appears in the header.
@@ -125,8 +137,9 @@ The app integrates basic Git operations directly in the header. All actions use 
   - This is the same capability offered right after selecting a non‑repo folder.
 
 Notes
-- Operations are local and safe: no network is used except the optional `fetch` for “New Branch…”.
-- Pull/push are not exposed in the UI. If desired, they can be added later.
+- Operations are local unless a remote call is required (the optional `fetch` during “New Branch…”, the fast-forward fetch performed by “Get Latest”, and the push that runs after each commit).
+- Open your workspace at the root of the Git repository (the folder containing `.git/`) so the app can detect and enable Git features; selecting a subdirectory skips the Git UI.
+- Pull support is limited to fast-forwarding via **Get Latest**; pushing is still not exposed in the UI.
 - On some Linux distros, libgit2 may require additional native dependencies. If the Git library can’t load, the UI will hide Git actions and log a helpful message.
 
 ## Conversation & Protocol Behavior

@@ -22,10 +22,31 @@ public partial class InputDialog : Window
         set => InputText.Text = value;
     }
 
+    public bool ShowCreatePullRequestOption
+    {
+        get => CreatePrCheckBox.IsVisible;
+        set => CreatePrCheckBox.IsVisible = value;
+    }
+
+    public bool CreatePullRequest
+    {
+        get => CreatePrCheckBox.IsChecked ?? false;
+        set => CreatePrCheckBox.IsChecked = value;
+    }
+
     private void OnOk(object? sender, RoutedEventArgs e)
-        => Close(InputText.Text);
+        => Close(new InputDialogResult
+        {
+            Text = InputText.Text ?? string.Empty,
+            CreatePullRequest = CreatePullRequest
+        });
 
     private void OnCancel(object? sender, RoutedEventArgs e)
         => Close(null);
 }
 
+public sealed class InputDialogResult
+{
+    public string Text { get; set; } = string.Empty;
+    public bool CreatePullRequest { get; set; }
+}

@@ -44,6 +44,5 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
-
   <!-- MCP mux removed; servers are loaded directly by Codex via config flags. -->
 </Project>
