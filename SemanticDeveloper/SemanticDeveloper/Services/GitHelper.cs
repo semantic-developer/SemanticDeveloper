@@ -214,6 +214,147 @@ public static class GitHelper
         }
     }
 
+    public static (bool Ok, string? Output, string? Error) TryFetchAndFastForward(string path)
+    {
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(path);
+            if (string.IsNullOrEmpty(repoRoot)) return (false, null, "Not a git repository");
+            using var repo = new Repository(repoRoot!);
+
+            var head = repo.Head;
+            if (head == null)
+                return (false, null, "Repository has no HEAD.");
+            if (repo.Info.IsHeadDetached)
+                return (false, null, "HEAD is detached; checkout a branch first.");
+            if (head.Tip == null)
+                return (false, null, "Current branch has no commits yet.");
+
+            Remote? remote = null;
+            if (!string.IsNullOrWhiteSpace(head.RemoteName))
+            {
+                remote = repo.Network.Remotes.FirstOrDefault(r => string.Equals(r.Name, head.RemoteName, StringComparison.Ordinal));
+            }
+
+            remote ??= repo.Network.Remotes.FirstOrDefault(r => string.Equals(r.Name, "origin", StringComparison.OrdinalIgnoreCase));
+
+            if (remote == null)
+                return (false, null, "No remote configured for this branch.");
+
+            Branch? tracked = head.TrackedBranch;
+            if (tracked == null)
+            {
+                var normalizedLocal = NormalizeBranchName(head.FriendlyName);
+                var candidateName = $"{remote.Name}/{normalizedLocal}";
+                var candidate = repo.Branches.FirstOrDefault(b => b.IsRemote && string.Equals(b.FriendlyName, candidateName, StringComparison.OrdinalIgnoreCase));
+                if (candidate != null)
+                {
+                    repo.Branches.Update(head,
+                        b => b.Remote = remote.Name,
+                        b => b.UpstreamBranch = candidate.CanonicalName);
+                    tracked = head.TrackedBranch;
+                }
+            }
+
+            if (tracked == null)
+                return (false, null, "Current branch is not tracking a remote branch.");
+
+            var pullOptions = new PullOptions
+            {
+                FetchOptions = new FetchOptions(),
+                MergeOptions = new MergeOptions
+                {
+                    FastForwardStrategy = FastForwardStrategy.FastForwardOnly
+                }
+            };
+
+            MergeResult result;
+            try
+            {
+                var signature = CreateSignature(repo);
+                result = Commands.Pull(repo, signature, pullOptions);
+            }
+            catch (Exception ex)
+            {
+                return (false, null, ex.Message);
+            }
+
+            return result.Status switch
+            {
+                MergeStatus.UpToDate => (true, "Already up to date.", null),
+                MergeStatus.FastForward => (true, $"Updated to {repo.Head.Tip.Sha[..7]}.", null),
+                MergeStatus.NonFastForward => (false, null, "Remote requires a merge or rebase; fast-forward not possible."),
+                _ => (false, null, $"Pull failed: {result.Status}.")
+            };
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
+    public static (bool Ok, string? Output, string? Error) TryPushCurrentBranch(string path)
+    {
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(path);
+            if (string.IsNullOrEmpty(repoRoot)) return (false, null, "Not a git repository");
+            using var repo = new Repository(repoRoot!);
+
+            var head = repo.Head;
+            if (head == null)
+                return (false, null, "Repository has no HEAD.");
+            if (repo.Info.IsHeadDetached)
+                return (false, null, "HEAD is detached; checkout a branch first.");
+            if (head.Tip == null)
+                return (false, null, "Nothing to push.");
+
+            Remote? remote = null;
+            if (!string.IsNullOrWhiteSpace(head.RemoteName))
+                remote = repo.Network.Remotes.FirstOrDefault(r => string.Equals(r.Name, head.RemoteName, StringComparison.Ordinal));
+            remote ??= repo.Network.Remotes.FirstOrDefault(r => string.Equals(r.Name, "origin", StringComparison.OrdinalIgnoreCase));
+
+            if (remote == null)
+                return (false, null, "No remote configured for this branch.");
+
+            var branchName = NormalizeBranchName(head.FriendlyName, remote.Name);
+            if (string.IsNullOrWhiteSpace(branchName))
+                branchName = head.FriendlyName;
+            var remoteCanonical = $"refs/heads/{branchName}";
+
+            if (head.TrackedBranch == null)
+            {
+                repo.Branches.Update(head,
+                    b => b.Remote = remote.Name,
+                    b => b.UpstreamBranch = remoteCanonical);
+            }
+
+            var pushOptions = new PushOptions();
+
+            try
+            {
+                repo.Network.Push(head, pushOptions);
+            }
+            catch (NonFastForwardException)
+            {
+                return (false, null, "Remote has diverged; run Get Latest or rebase before pushing.");
+            }
+            catch (LibGit2SharpException ex)
+            {
+                var msg = ex.Message;
+                if (msg.Contains("authentication", StringComparison.OrdinalIgnoreCase))
+                    return (false, null, "Authentication required for push. Configure credentials and try again.");
+                return (false, null, msg);
+            }
+
+            return (true, $"Pushed {branchName} to {remote.Name}.", null);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
     public static (bool Ok, string? Output, string? Error) TryRollbackAllChanges(string path)
     {
         try
@@ -280,6 +421,151 @@ public static class GitHelper
         catch (Exception ex)
         {
             return (false, null, ex.Message);
+        }
+    }
+
+    public static (bool Ok, string? Url, string? Error) TryBuildPullRequestUrl(string path)
+    {
+        try
+        {
+            var repoRoot = DiscoverRepositoryRoot(path);
+            if (string.IsNullOrEmpty(repoRoot)) return (false, null, "Not a git repository");
+
+            using var repo = new Repository(repoRoot!);
+            var head = repo.Head;
+            if (head == null || head.Tip == null)
+                return (false, null, "No commits in repository.");
+
+            var headBranch = head.FriendlyName;
+            if (string.IsNullOrWhiteSpace(headBranch))
+                return (false, null, "Unable to determine current branch.");
+
+            Remote? remote = null;
+            if (!string.IsNullOrWhiteSpace(head.RemoteName))
+            {
+                remote = repo.Network.Remotes.FirstOrDefault(r => string.Equals(r.Name, head.RemoteName, StringComparison.Ordinal));
+            }
+
+            remote ??= repo.Network.Remotes.FirstOrDefault(r => string.Equals(r.Name, "origin", StringComparison.OrdinalIgnoreCase));
+
+            if (remote == null)
+                return (false, null, "No remote configured for this branch.");
+
+            var baseBranch = ResolveDefaultRemoteBranch(repo, remote) ?? "main";
+            var headName = NormalizeBranchName(headBranch);
+
+            if (string.Equals(baseBranch, headName, StringComparison.OrdinalIgnoreCase))
+            {
+                return (false, null, "Current branch matches remote default branch.");
+            }
+
+            var remoteUrl = remote.Url ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(remoteUrl))
+                return (false, null, "Remote URL not configured.");
+
+            if (TryBuildGitHubPullRequestUrl(remoteUrl, baseBranch, headName, out var prUrl))
+                return (true, prUrl, null);
+
+            return (false, null, "Unsupported remote host for pull request shortcut.");
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
+    private static string NormalizeBranchName(string branch, string? remoteName = null)
+    {
+        var result = branch ?? string.Empty;
+        if (result.StartsWith("refs/heads/", StringComparison.OrdinalIgnoreCase))
+        {
+            result = result.Substring("refs/heads/".Length);
+            return result;
+        }
+        if (result.StartsWith("refs/remotes/", StringComparison.OrdinalIgnoreCase))
+        {
+            var rest = result.Substring("refs/remotes/".Length);
+            var idx = rest.IndexOf('/');
+            if (idx >= 0 && idx + 1 < rest.Length)
+                rest = rest[(idx + 1)..];
+            result = rest;
+        }
+        if (!string.IsNullOrWhiteSpace(remoteName))
+        {
+            var prefix = remoteName + "/";
+            if (result.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                result = result.Substring(prefix.Length);
+        }
+        return result;
+    }
+
+    private static bool TryBuildGitHubPullRequestUrl(string remoteUrl, string baseBranch, string headBranch, out string? url)
+    {
+        url = null;
+        string? repoPath = null;
+
+        var trimmed = remoteUrl.Trim();
+        const string httpsPrefix = "https://github.com/";
+        const string sshPrefix = "git@github.com:";
+        const string sshAltPrefix = "ssh://git@github.com/";
+
+        if (trimmed.StartsWith(httpsPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            repoPath = trimmed.Substring(httpsPrefix.Length);
+        }
+        else if (trimmed.StartsWith(sshPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            repoPath = trimmed.Substring(sshPrefix.Length);
+        }
+        else if (trimmed.StartsWith(sshAltPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            repoPath = trimmed.Substring(sshAltPrefix.Length);
+        }
+        else
+        {
+            return false;
+        }
+
+        if (repoPath.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+        {
+            repoPath = repoPath.Substring(0, repoPath.Length - 4);
+        }
+
+        repoPath = repoPath.TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(repoPath) || !repoPath.Contains('/'))
+            return false;
+
+        var baseEncoded = Uri.EscapeDataString(baseBranch);
+        var headEncoded = Uri.EscapeDataString(headBranch);
+        url = $"https://github.com/{repoPath}/compare/{baseEncoded}...{headEncoded}?expand=1";
+        return true;
+    }
+
+    private static string? ResolveDefaultRemoteBranch(Repository repo, Remote remote)
+    {
+        try
+        {
+            var remotePrefix = remote.Name + "/";
+            string[] preferred = { "main", "master" };
+            foreach (var candidate in preferred)
+            {
+                var full = remotePrefix + candidate;
+                if (repo.Branches.Any(b => b.IsRemote && string.Equals(b.FriendlyName, full, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return candidate;
+                }
+            }
+
+            var firstRemote = repo.Branches
+                .Where(b => b.IsRemote && b.FriendlyName.StartsWith(remotePrefix, StringComparison.OrdinalIgnoreCase))
+                .Select(b => b.FriendlyName.Substring(remotePrefix.Length))
+                .FirstOrDefault();
+
+            return firstRemote;
+        }
+        catch
+        {
+            return null;
         }
     }
 

@@ -1095,6 +1095,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         LoadTree(selected);
         // do not persist workspace; every session should be fresh
 
+        _ = CheckCodexVersionAsync();
+
         // Git check
         if (!GitHelper.IsGitRepository(selected))
         {
@@ -1129,6 +1131,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         RefreshGitUi();
         await RestartCliAsync();
+    }
+
+    private async Task CheckCodexVersionAsync()
+    {
+        try
+        {
+            var latest = CodexVersionService.TryReadLatestVersion();
+            if (!latest.Ok || string.IsNullOrWhiteSpace(latest.Version)) return;
+
+            var installed = await CodexVersionService.TryGetInstalledVersionAsync(_cli.Command, CurrentWorkspacePath ?? Directory.GetCurrentDirectory());
+            if (!installed.Ok || string.IsNullOrWhiteSpace(installed.Version)) return;
+
+            if (CodexVersionService.IsNewer(latest.Version, installed.Version))
+            {
+                AppendCliLog($"System: Codex {latest.Version} is available (installed {installed.Version}). Run 'codex update' to upgrade.");
+            }
+        }
+        catch
+        {
+            // best-effort; ignore failures
+        }
     }
 
     private void LoadTree(string rootPath)
@@ -1686,7 +1709,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ".js" => "source.js",
                 ".ts" => "source.ts",
                 ".json" => "source.json",
-                ".xml" => "text.xml",
+                ".xml" or ".xaml" or ".axaml" or ".csproj" => "text.xml",
                 ".yml" or ".yaml" => "source.yaml",
                 ".py" => "source.python",
                 ".rb" => "source.ruby",
@@ -1700,7 +1723,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ".ps1" => "source.powershell",
                 ".sql" => "source.sql",
                 ".toml" => "source.toml",
-                ".ini" => "source.ini",
+                ".ini" or ".sln" => "source.ini",
                 _ => "text.plain"
             };
 
@@ -2152,7 +2175,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                                 var dlg = new Views.InputDialog { Title = "Enter Verification Code" };
                                 dlg.Prompt = "Paste the verification code from the browser:";
                                 dlg.Input = string.Empty;
-                                var code = await dlg.ShowDialog<string?>(this);
+                                var result = await dlg.ShowDialog<Views.InputDialogResult?>(this);
+                                var code = result?.Text;
                                 if (!string.IsNullOrWhiteSpace(code))
                                 {
                                     try { await p.StandardInput.WriteLineAsync(code); } catch { }
@@ -3409,17 +3433,55 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         };
         dlg.Prompt = "Commit message:";
         dlg.Input = string.Empty;
-        var message = await dlg.ShowDialog<string?>(this);
-        if (message is null) return;
+        dlg.ShowCreatePullRequestOption = true;
+        var result = await dlg.ShowDialog<Views.InputDialogResult?>(this);
+        if (result is null) return;
+
+        var message = result.Text;
         var (ok, output, error) = GitHelper.TryCommitAll(CurrentWorkspacePath, message);
         if (ok)
         {
             AppendCliLog(output ?? "Committed.");
             LoadTree(CurrentWorkspacePath);
+
+            var (pushOk, pushOutput, pushError) = GitHelper.TryPushCurrentBranch(CurrentWorkspacePath);
+            if (pushOk)
+            {
+                if (!string.IsNullOrWhiteSpace(pushOutput)) AppendCliLog(pushOutput);
+                else AppendCliLog("Pushed changes to remote.");
+
+                if (result.CreatePullRequest)
+                {
+                    TryLaunchCreatePullRequest();
+                }
+            }
+            else
+            {
+                AppendCliLog("Git push failed: " + (pushError ?? "unknown error"));
+                if (result.CreatePullRequest)
+                {
+                    AppendCliLog("System: Skipping pull request shortcut because push did not succeed.");
+                }
+            }
         }
         else
         {
             AppendCliLog("Git commit failed: " + (error ?? "unknown error"));
+        }
+    }
+
+    private void TryLaunchCreatePullRequest()
+    {
+        if (!HasWorkspace || CurrentWorkspacePath is null) return;
+        var (ok, url, error) = GitHelper.TryBuildPullRequestUrl(CurrentWorkspacePath);
+        if (ok && !string.IsNullOrWhiteSpace(url))
+        {
+            AppendCliLog("System: Opening browser to create pull request…");
+            TryOpenUrl(url!);
+        }
+        else
+        {
+            AppendCliLog("System: Unable to prepare pull request: " + (error ?? "unknown error"));
         }
     }
 
@@ -3432,7 +3494,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         };
         dlg.Prompt = "Branch name:";
         dlg.Input = string.Empty;
-        var name = await dlg.ShowDialog<string?>(this);
+        var result = await dlg.ShowDialog<Views.InputDialogResult?>(this);
+        var name = result?.Text;
         if (name is null) return;
         // Create branch based on default branch (main/master) and fetch origin first
         var (ok, output, error) = GitHelper.TryCreateAndCheckoutBranch(CurrentWorkspacePath, name, baseOnDefaultBranch: true, fetchOriginFirst: true);
@@ -3445,6 +3508,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         else
         {
             AppendCliLog("Git branch failed: " + (error ?? "unknown error"));
+        }
+    }
+
+    private async void OnGitGetLatestClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (!HasWorkspace || CurrentWorkspacePath is null || !IsGitRepo) return;
+        AppendCliLog("System: Fetching latest changes…");
+        var (ok, output, error) = await Task.Run(() => GitHelper.TryFetchAndFastForward(CurrentWorkspacePath));
+        if (ok)
+        {
+            AppendCliLog(output ?? "Already up to date.");
+            RefreshGitUi();
+            LoadTree(CurrentWorkspacePath);
+        }
+        else
+        {
+            AppendCliLog("Git update failed: " + (error ?? "unknown error"));
         }
     }
 
@@ -3461,7 +3541,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var dlg = new Views.InputDialog { Title = "Switch Branch" };
         dlg.Prompt = "Branch name:";
         dlg.Input = CurrentBranch;
-        var name = await dlg.ShowDialog<string?>(this);
+        var result = await dlg.ShowDialog<Views.InputDialogResult?>(this);
+        var name = result?.Text;
         if (string.IsNullOrWhiteSpace(name)) return;
         var (ok, output, error) = GitHelper.TryCheckoutBranch(CurrentWorkspacePath, name);
         if (ok)

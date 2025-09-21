@@ -32,6 +32,7 @@
                             <MenuItem Header="Commit…" Click="OnGitCommitClick"/>
                             <MenuItem Header="New Branch…" Click="OnGitNewBranchClick"/>
                             <MenuItem Header="Switch Branch…" Click="OnGitSwitchBranchClick"/>
+                            <MenuItem Header="Get Latest" Click="OnGitGetLatestClick"/>
                             <MenuItem Header="Refresh" Click="OnGitRefreshClick"/>
                         </MenuFlyout>
                     </Button.Flyout>
