@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SemanticDeveloper
+Comment=Avalonia desktop UI for Codex CLI
+Exec=semantic-developer
+Icon=semantic-developer
+Terminal=false
+Categories=Development;Utility;
+

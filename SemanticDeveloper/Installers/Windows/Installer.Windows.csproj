@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SemanticDeveloper.Installer.Windows</AssemblyName>
+    <RootNamespace>SemanticDeveloper.Installer.Windows</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="build.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="SemanticDeveloper.iss" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="Package" DependsOnTargets="Build">
+    <Message Text="Run build.ps1 to create Windows installer or zip package." Importance="High" />
+  </Target>
+</Project>
