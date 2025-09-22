@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SemanticDeveloper.Installer.macOS</AssemblyName>
+    <RootNamespace>SemanticDeveloper.Installer.macOS</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="create_dmg.sh" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Info.plist" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="Package" DependsOnTargets="Build">
+    <Message Text="Run create_dmg.sh on macOS to build .app and .dmg." Importance="High" />
+  </Target>
+</Project>
+

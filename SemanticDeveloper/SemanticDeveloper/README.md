@@ -221,4 +221,12 @@ Selection behavior:
 - Proto mode is enforced in code; the app does not fall back to non‑proto modes.
 - Settings are stored under the OS‑specific application data directory and loaded on startup.
 - The log view uses AvaloniaEdit + TextMate (Dark+) for better legibility and simple JSON syntax coloring.
+
+## Installers
+
+- Windows: see `SemanticDeveloper/Installers/Windows` for `build.ps1` to produce a ZIP or Inno Setup installer.
+- macOS: see `SemanticDeveloper/Installers/macOS` for `create_dmg.sh` to produce a `.app` and `.dmg`.
+- Linux (Debian/Ubuntu): see `SemanticDeveloper/Installers/Linux` for `build_deb.sh` to produce a `.deb`.
+
+Each installer project contains detailed prerequisites and step-by-step instructions.
 - Token stats in the header are derived from `token_count` events. The percent remaining is estimated (using a baseline of ~12k tokens for fixed prompts) and may be approximate.

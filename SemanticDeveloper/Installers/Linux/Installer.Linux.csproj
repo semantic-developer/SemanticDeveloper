@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SemanticDeveloper.Installer.Linux</AssemblyName>
+    <RootNamespace>SemanticDeveloper.Installer.Linux</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="build_deb.sh" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="debian/usr/share/applications/semantic-developer.desktop" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="Package" DependsOnTargets="Build">
+    <Message Text="Run build_deb.sh on Debian/Ubuntu to build .deb." Importance="High" />
+  </Target>
+</Project>
