@@ -11,8 +11,8 @@
         <TextBlock x:Name="MessageText" TextWrapping="Wrap"/>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-            <Button Width="96" x:Name="CancelButton" Click="OnCancel">Cancel</Button>
-            <Button Width="96" x:Name="OkButton" Click="OnOk">OK</Button>
+            <Button Width="96" x:Name="CancelButton" Click="OnCancel" IsCancel="True">Cancel</Button>
+            <Button Width="96" x:Name="OkButton" Click="OnOk" IsDefault="True">OK</Button>
         </StackPanel>
     </Grid>
 </Window>
