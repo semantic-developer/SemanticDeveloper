@@ -1,14 +1,20 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Diagnostics;
 using System.Threading.Tasks;
+using System.Text;
 using LibGit2Sharp;
 using System.Collections.Generic;
+using LibGit2Sharp.Handlers;
 
 namespace SemanticDeveloper.Services;
 
 public static class GitHelper
 {
+    private static readonly Dictionary<string, (string Username, string Password)> _credentialCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object CredentialCacheLock = new();
+
     public static bool IsGitRepository(string path)
     {
         try
@@ -161,7 +167,8 @@ public static class GitHelper
                     if (origin is not null)
                     {
                         var refSpecs = origin.FetchRefSpecs.Select(x => x.Specification).ToList();
-                        Commands.Fetch(repo, origin.Name, refSpecs, new FetchOptions(), null);
+                        var fetchOptions = CreateFetchOptions(origin);
+                        Commands.Fetch(repo, origin.Name, refSpecs, fetchOptions, null);
                     }
                 }
                 catch { }
@@ -261,7 +268,7 @@ public static class GitHelper
 
             var pullOptions = new PullOptions
             {
-                FetchOptions = new FetchOptions(),
+                FetchOptions = CreateFetchOptions(remote),
                 MergeOptions = new MergeOptions
                 {
                     FastForwardStrategy = FastForwardStrategy.FastForwardOnly
@@ -273,6 +280,10 @@ public static class GitHelper
             {
                 var signature = CreateSignature(repo);
                 result = Commands.Pull(repo, signature, pullOptions);
+            }
+            catch (LibGit2SharpException ex)
+            {
+                return (false, null, FormatCredentialErrorIfNeeded(ex.Message, remote));
             }
             catch (Exception ex)
             {
@@ -329,7 +340,7 @@ public static class GitHelper
                     b => b.UpstreamBranch = remoteCanonical);
             }
 
-            var pushOptions = new PushOptions();
+            var pushOptions = CreatePushOptions(remote);
 
             try
             {
@@ -341,10 +352,7 @@ public static class GitHelper
             }
             catch (LibGit2SharpException ex)
             {
-                var msg = ex.Message;
-                if (msg.Contains("authentication", StringComparison.OrdinalIgnoreCase))
-                    return (false, null, "Authentication required for push. Configure credentials and try again.");
-                return (false, null, msg);
+                return (false, null, FormatCredentialErrorIfNeeded(ex.Message, remote));
             }
 
             return (true, $"Pushed {branchName} to {remote.Name}.", null);
@@ -474,6 +482,14 @@ public static class GitHelper
         }
     }
 
+    public static void StoreRuntimeCredential(string? remoteUrl, string? username, string password)
+    {
+        if (string.IsNullOrWhiteSpace(password)) return;
+        var url = remoteUrl ?? string.Empty;
+        var resolvedUsername = string.IsNullOrWhiteSpace(username) ? DetermineUsername(null, url) : username;
+        CacheCredential(url, resolvedUsername, password);
+    }
+
     private static string NormalizeBranchName(string branch, string? remoteName = null)
     {
         var result = branch ?? string.Empty;
@@ -567,6 +583,365 @@ public static class GitHelper
         {
             return null;
         }
+    }
+
+    private static FetchOptions CreateFetchOptions(Remote? remote = null)
+        => new FetchOptions
+        {
+            CredentialsProvider = CreateCredentialsHandler(remote?.Url)
+        };
+
+    private static PushOptions CreatePushOptions(Remote? remote = null)
+        => new PushOptions
+        {
+            CredentialsProvider = CreateCredentialsHandler(remote?.Url)
+        };
+
+    private static CredentialsHandler CreateCredentialsHandler(string? remoteUrl)
+        => (url, usernameFromUrl, types) => BuildCredentials(string.IsNullOrWhiteSpace(url) ? remoteUrl ?? string.Empty : url, usernameFromUrl, types);
+
+    private static Credentials BuildCredentials(string url, string? usernameFromUrl, SupportedCredentialTypes types)
+    {
+        var username = DetermineUsername(usernameFromUrl, url);
+        var hasExplicitUsername = !string.IsNullOrWhiteSpace(usernameFromUrl);
+
+        if (types.HasFlag(SupportedCredentialTypes.UsernamePassword))
+        {
+            var credential = TryGetUserPassCredentials(url, username, hasExplicitUsername);
+            if (credential is not null)
+                return credential;
+        }
+
+        if (types.HasFlag(SupportedCredentialTypes.Default))
+            return new DefaultCredentials();
+
+        // As a final attempt, try helper lookup even if libgit2 didn't request username/password explicitly
+        var fallback = TryGetUserPassCredentials(url, username, hasExplicitUsername);
+        if (fallback is not null)
+            return fallback;
+
+        return new DefaultCredentials();
+    }
+
+    private static UsernamePasswordCredentials? TryGetUserPassCredentials(string url, string username, bool hasExplicitUsername)
+    {
+        var cached = TryGetCachedCredential(url);
+        if (cached is not null)
+            return cached;
+
+        var fromHelper = TryGetCredentialsFromGitHelper(url, username, hasExplicitUsername);
+        if (fromHelper is not null)
+        {
+            CacheCredential(url, fromHelper.Username, fromHelper.Password);
+            return fromHelper;
+        }
+
+        var fromEnvironment = TryGetCredentialsFromEnvironment(url, username);
+        if (fromEnvironment is not null)
+        {
+            CacheCredential(url, fromEnvironment.Username, fromEnvironment.Password);
+            return fromEnvironment;
+        }
+
+        return null;
+    }
+
+    private static UsernamePasswordCredentials? TryGetCredentialsFromGitHelper(string url, string username, bool hasExplicitUsername)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("git", "credential fill")
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+
+            using var process = Process.Start(psi);
+            if (process is null) return null;
+
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                {
+                    if (!string.IsNullOrWhiteSpace(uri.Scheme))
+                        process.StandardInput.WriteLine($"protocol={uri.Scheme}");
+                    if (!string.IsNullOrWhiteSpace(uri.Host))
+                        process.StandardInput.WriteLine($"host={uri.Host}");
+                    if (hasExplicitUsername && !string.IsNullOrWhiteSpace(username))
+                        process.StandardInput.WriteLine($"username={username}");
+                    var path = uri.AbsolutePath;
+                    if (!string.IsNullOrEmpty(path) && path != "/")
+                        process.StandardInput.WriteLine($"path={path.TrimStart('/')}");
+                }
+                else if (url.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
+                {
+                    var at = url.IndexOf('@');
+                    var colon = url.IndexOf(':', at + 1);
+                    process.StandardInput.WriteLine("protocol=ssh");
+                    if (at >= 0)
+                    {
+                        string host;
+                        if (colon > at)
+                            host = url.Substring(at + 1, colon - at - 1);
+                        else
+                            host = url[(at + 1)..];
+                        if (!string.IsNullOrWhiteSpace(host))
+                            process.StandardInput.WriteLine($"host={host}");
+                    }
+                    if (hasExplicitUsername && !string.IsNullOrWhiteSpace(username))
+                        process.StandardInput.WriteLine($"username={username}");
+                    if (colon > 0 && colon + 1 < url.Length)
+                        process.StandardInput.WriteLine($"path={url[(colon + 1)..]}");
+                }
+                else
+                {
+                    process.StandardInput.WriteLine($"url={url}");
+                    if (hasExplicitUsername && !string.IsNullOrWhiteSpace(username))
+                        process.StandardInput.WriteLine($"username={username}");
+                }
+            }
+            else if (hasExplicitUsername && !string.IsNullOrWhiteSpace(username))
+            {
+                process.StandardInput.WriteLine($"username={username}");
+            }
+            process.StandardInput.WriteLine();
+            process.StandardInput.Flush();
+            process.StandardInput.Close();
+
+            var output = process.StandardOutput.ReadToEnd();
+            bool exited = process.WaitForExit(3000);
+            if (!exited)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit();
+                }
+                catch { }
+            }
+
+            if (!exited && !process.HasExited)
+                return null;
+
+            if (process.ExitCode != 0)
+                return null;
+
+            var parsed = ParseKeyValueOutput(output);
+            var user = parsed.TryGetValue("username", out var helperUser) && !string.IsNullOrEmpty(helperUser)
+                ? helperUser
+                : username;
+            if (parsed.TryGetValue("password", out var password) && !string.IsNullOrEmpty(password))
+            {
+                return new UsernamePasswordCredentials
+                {
+                    Username = string.IsNullOrEmpty(user) ? DetermineUsername(null, url) : user,
+                    Password = password
+                };
+            }
+        }
+        catch
+        {
+            // ignore helper errors; fall back to other mechanisms
+        }
+        return null;
+    }
+
+    private static UsernamePasswordCredentials? TryGetCredentialsFromEnvironment(string url, string username)
+    {
+        try
+        {
+            var resolvedUsername = username;
+            if (string.IsNullOrEmpty(resolvedUsername) || string.Equals(resolvedUsername, "git", StringComparison.OrdinalIgnoreCase))
+            {
+                var envUser = Environment.GetEnvironmentVariable("GIT_USERNAME");
+                if (!string.IsNullOrEmpty(envUser))
+                    resolvedUsername = envUser;
+            }
+
+            if (url.Contains("github.com", StringComparison.OrdinalIgnoreCase))
+            {
+                var token = Environment.GetEnvironmentVariable("GITHUB_TOKEN")
+                            ?? Environment.GetEnvironmentVariable("GH_TOKEN");
+                if (!string.IsNullOrEmpty(token))
+                {
+                    return new UsernamePasswordCredentials
+                    {
+                        Username = string.IsNullOrEmpty(resolvedUsername) ? "git" : resolvedUsername,
+                        Password = token
+                    };
+                }
+            }
+
+            var generic = Environment.GetEnvironmentVariable("GIT_TOKEN");
+            if (!string.IsNullOrEmpty(generic))
+            {
+                return new UsernamePasswordCredentials
+                {
+                    Username = string.IsNullOrEmpty(resolvedUsername) ? "git" : resolvedUsername,
+                    Password = generic
+                };
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static UsernamePasswordCredentials? TryGetCachedCredential(string url)
+    {
+        var host = TryExtractHost(url);
+        if (string.IsNullOrEmpty(host))
+            return null;
+        lock (CredentialCacheLock)
+        {
+            if (_credentialCache.TryGetValue(host, out var entry))
+            {
+                return new UsernamePasswordCredentials
+                {
+                    Username = entry.Username,
+                    Password = entry.Password
+                };
+            }
+        }
+        return null;
+    }
+
+    private static void CacheCredential(string url, string username, string password)
+    {
+        if (string.IsNullOrEmpty(password)) return;
+        var host = TryExtractHost(url);
+        if (string.IsNullOrEmpty(host)) return;
+        lock (CredentialCacheLock)
+        {
+            _credentialCache[host] = (username, password);
+        }
+    }
+
+    private static Dictionary<string, string> ParseKeyValueOutput(string? output)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrEmpty(output)) return result;
+        using var reader = new StringReader(output);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            var idx = line.IndexOf('=');
+            if (idx <= 0) continue;
+            var key = line.Substring(0, idx).Trim();
+            var value = line[(idx + 1)..].Trim();
+            if (key.Length > 0)
+                result[key] = value;
+        }
+        return result;
+    }
+
+    private static string? TryExtractHost(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return null;
+        try
+        {
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            {
+                if (!string.IsNullOrWhiteSpace(uri.Host))
+                    return uri.Host;
+            }
+            else if (url.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
+            {
+                var at = url.IndexOf('@');
+                if (at >= 0)
+                {
+                    var colon = url.IndexOf(':', at + 1);
+                    if (colon > at)
+                        return url.Substring(at + 1, colon - at - 1);
+                    return url.Substring(at + 1);
+                }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static bool IsCredentialMessage(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+            return false;
+        return message.Contains("credential", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("authentication", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("auth", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FormatCredentialErrorIfNeeded(string? message, Remote? remote)
+    {
+        if (IsCredentialMessage(message))
+            return BuildCredentialAdvice(message, remote);
+
+        return string.IsNullOrWhiteSpace(message) ? "Authentication failed." : message!;
+    }
+
+    private static string BuildCredentialAdvice(string? message, Remote? remote)
+    {
+        var sb = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            var trimmed = message!.Trim();
+            sb.Append(trimmed.EndsWith('.') ? trimmed : trimmed + '.');
+        }
+        else
+        {
+            sb.Append("Authentication required.");
+        }
+
+        var remoteDescriptor = remote?.Url;
+        if (string.IsNullOrWhiteSpace(remoteDescriptor))
+            remoteDescriptor = remote?.Name;
+        if (!string.IsNullOrWhiteSpace(remoteDescriptor))
+        {
+            var descriptor = remoteDescriptor!;
+            sb.Append(' ');
+            sb.Append("Remote: ");
+            sb.Append(descriptor);
+            if (!descriptor.EndsWith('.'))
+                sb.Append('.');
+        }
+
+        sb.Append(' ');
+        sb.Append("Configure git credentials for this host (for example, run `git fetch` once in a terminal to cache credentials, set an environment token like `GITHUB_TOKEN`/`GIT_TOKEN`, or add an entry via `git credential-store`). Then retry the operation.");
+        return sb.ToString();
+    }
+
+    private static string DetermineUsername(string? usernameFromUrl, string? url)
+    {
+        if (!string.IsNullOrWhiteSpace(usernameFromUrl))
+            return usernameFromUrl;
+
+        if (string.IsNullOrWhiteSpace(url))
+            return "git";
+
+        try
+        {
+            if (url.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
+            {
+                var at = url.IndexOf('@');
+                if (at > 0)
+                    return url.Substring(0, at);
+            }
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            {
+                if (!string.IsNullOrEmpty(uri.UserInfo))
+                {
+                    var parts = uri.UserInfo.Split(':');
+                    if (parts.Length > 0 && !string.IsNullOrEmpty(parts[0]))
+                        return parts[0];
+                }
+            }
+        }
+        catch { }
+
+        return "git";
     }
 
     public static (bool Ok, string? Content, string? Error) TryReadTextAtHead(string filePath)

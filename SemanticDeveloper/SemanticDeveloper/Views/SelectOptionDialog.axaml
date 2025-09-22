@@ -10,9 +10,8 @@
         <TextBlock x:Name="PromptText" TextWrapping="Wrap"/>
         <ListBox Grid.Row="1" x:Name="OptionsList" SelectionMode="Single"/>
         <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-            <Button Width="96" Click="OnCancel">Cancel</Button>
-            <Button Width="96" Click="OnOk">OK</Button>
+            <Button Width="96" Click="OnCancel" IsCancel="True">Cancel</Button>
+            <Button Width="96" Click="OnOk" IsDefault="True">OK</Button>
         </StackPanel>
     </Grid>
 </Window>
-

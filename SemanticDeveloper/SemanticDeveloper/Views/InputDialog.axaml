@@ -12,8 +12,8 @@
         <TextBox Grid.Row="1" x:Name="InputText"/>
         <CheckBox Grid.Row="2" x:Name="CreatePrCheckBox" Content="Create Pull Request" IsVisible="False"/>
         <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-            <Button Width="96" Click="OnCancel">Cancel</Button>
-            <Button Width="96" Click="OnOk">OK</Button>
+            <Button Width="96" Click="OnCancel" IsCancel="True">Cancel</Button>
+            <Button Width="96" Click="OnOk" IsDefault="True">OK</Button>
         </StackPanel>
     </Grid>
 </Window>
