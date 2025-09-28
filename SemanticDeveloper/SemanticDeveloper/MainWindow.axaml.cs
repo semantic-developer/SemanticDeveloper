@@ -45,6 +45,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private string? _currentWorkspacePath;
     private string _cliLog = string.Empty;
+    private TextEditor? _logEditor;
+    private bool _logAutoScroll = true;
     private bool _isCliRunning;
     public ObservableCollection<FileTreeItem> TreeRoots { get; } = new();
     private string? _lastRenderedAgentMessage;
@@ -83,6 +85,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _loginAttempted;
     private bool _showMcpResultsInLog;
     private bool _showMcpResultsOnlyWhenNoEdits;
+    private string _selectedProfile = string.Empty;
 
     // Per-turn flags
     private bool _turnInProgress;
@@ -122,10 +125,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var ctrl = this.FindControl<Control>("LogEditor");
             if (ctrl is AvaloniaEdit.TextEditor editor)
             {
+                _logEditor = editor;
+                try
+                {
+                    var opts = editor.Options;
+                    opts.AllowScrollBelowDocument = false;
+                }
+                catch { }
                 var registryOptions = new RegistryOptions(ThemeName.DarkPlus);
                 var installation = editor.InstallTextMate(registryOptions);
                 installation.SetGrammar("source.json");
                 editor.TextArea.TextView.LineTransformers.Add(new LogPrefixColorizer());
+                try
+                {
+                    editor.TextArea.TextView.ScrollOffsetChanged += OnLogScrollOffsetChanged;
+                }
+                catch { }
             }
         }
         catch { }
@@ -136,6 +151,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _cli.UseApiKey = _settings.UseApiKey;
         _cli.ApiKey = string.IsNullOrWhiteSpace(_settings.ApiKey) ? null : _settings.ApiKey;
         AppendCliLog($"System: Loaded CLI settings: '{_cli.Command}'{(string.IsNullOrWhiteSpace(_settings.SelectedProfile)?"":" • profile=" + _settings.SelectedProfile)}");
+        SelectedProfile = _settings.SelectedProfile;
         _currentModel = TryExtractModelFromArgs(_cli.AdditionalArgs);
         _verboseLogging = _settings.VerboseLoggingEnabled;
         IsMcpEnabled = _settings.McpEnabled;
@@ -405,6 +421,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    public string SelectedProfile
+    {
+        get => _selectedProfile;
+        set
+        {
+            if (_selectedProfile == value) return;
+            _selectedProfile = value ?? string.Empty;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(HasSelectedProfile));
+        }
+    }
+
+    public bool HasSelectedProfile => !string.IsNullOrWhiteSpace(SelectedProfile);
+
     private void AppendCliLog(string text)
     {
         if (string.IsNullOrEmpty(text)) return;
@@ -413,10 +443,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             CliLog += cleaned + Environment.NewLine;
             CliLogDocument.Text += cleaned + Environment.NewLine;
+            AutoScrollLogIfNeeded();
         }
         else
         {
-            Dispatcher.UIThread.Post(() => { CliLog += cleaned + Environment.NewLine; CliLogDocument.Text += cleaned + Environment.NewLine; });
+            Dispatcher.UIThread.Post(() =>
+            {
+                CliLog += cleaned + Environment.NewLine;
+                CliLogDocument.Text += cleaned + Environment.NewLine;
+                AutoScrollLogIfNeeded();
+            });
         }
     }
 
@@ -428,10 +464,59 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             CliLog += cleaned;
             CliLogDocument.Text += cleaned;
+            AutoScrollLogIfNeeded();
         }
         else
         {
-            Dispatcher.UIThread.Post(() => { CliLog += cleaned; CliLogDocument.Text += cleaned; });
+            Dispatcher.UIThread.Post(() =>
+            {
+                CliLog += cleaned;
+                CliLogDocument.Text += cleaned;
+                AutoScrollLogIfNeeded();
+            });
+        }
+    }
+
+    private void AutoScrollLogIfNeeded()
+    {
+        if (!_logAutoScroll) return;
+        if (_logEditor is null) return;
+        try
+        {
+            var docLength = _logEditor.Document?.TextLength ?? 0;
+            _logEditor.TextArea.Caret.Offset = docLength;
+            _logEditor.TextArea.Caret.BringCaretToView();
+        }
+        catch { }
+    }
+
+    private void OnLogScrollOffsetChanged(object? sender, EventArgs e)
+    {
+        if (_logEditor is null)
+        {
+            _logAutoScroll = true;
+            return;
+        }
+
+        try
+        {
+            var textView = _logEditor.TextArea.TextView;
+            var documentHeight = textView.DocumentHeight;
+            var viewportHeight = textView.Bounds.Height;
+
+            if (viewportHeight <= 0 || documentHeight <= viewportHeight)
+            {
+                _logAutoScroll = true;
+                return;
+            }
+
+            var bottom = textView.VerticalOffset + viewportHeight;
+            var threshold = Math.Max(24, viewportHeight / 3);
+            _logAutoScroll = bottom >= documentHeight - threshold;
+        }
+        catch
+        {
+            _logAutoScroll = true;
         }
     }
 
@@ -894,9 +979,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     var code = msg? ["exit_code"]?.ToString();
                     var callId = msg? ["call_id"]?.ToString();
                     if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
-                    if (!string.IsNullOrWhiteSpace(callId) && _execSuppressed.Contains(callId!))
-                        AppendCliLog($"System: (exit {code}) — output suppressed");
-                    else if (!string.IsNullOrWhiteSpace(callId) && _execTruncated.Contains(callId!))
+                    if (!string.IsNullOrWhiteSpace(callId) && _execTruncated.Contains(callId!))
                         AppendCliLog($"System: (exit {code}) — output truncated");
                     else
                         AppendCliLog($"System: (exit {code})");
@@ -1048,8 +1131,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         long input = total.Value<long?>("input_tokens") ?? 0L;
         long cached = total.Value<long?>("cached_input_tokens") ?? 0L;
         long output = total.Value<long?>("output_tokens") ?? 0L;
-        long reasoningOut = total.Value<long?>("reasoning_output_tokens") ?? 0L;
-        long totalTokens = total.Value<long?>("total_tokens") ?? 0L;
         long blendedTotal = Math.Max(0, (input - cached)) + output;
 
         var modelCw = (info["model_context_window"]?.Type == Newtonsoft.Json.Linq.JTokenType.Integer)
@@ -1059,15 +1140,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         int? percentLeft = null;
         if (modelCw.HasValue && modelCw.Value > 0)
         {
-            const long BASELINE = 12000;
+            const long DefaultBaseline = 12000;
             long window = modelCw.Value;
-            if (window > BASELINE)
+            long baseline = Math.Min(DefaultBaseline, Math.Max(0L, window / 4));
+            long effectiveWindow = window - baseline;
+            if (effectiveWindow <= 0)
             {
-                long effectiveWindow = window - BASELINE;
-                long tokensInWindow = Math.Max(0, totalTokens - reasoningOut);
-                long used = Math.Max(0, tokensInWindow - BASELINE);
+                baseline = 0;
+                effectiveWindow = window;
+            }
+
+            if (effectiveWindow > 0)
+            {
+                long used = Math.Max(0, blendedTotal - baseline);
                 long remaining = Math.Max(0, effectiveWindow - used);
-                percentLeft = (int)Math.Clamp((remaining * 100.0 / effectiveWindow), 0, 100);
+                percentLeft = (int)Math.Clamp(remaining * 100.0 / Math.Max(1, effectiveWindow), 0, 100);
             }
         }
 
@@ -1213,6 +1300,208 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    private async void OnCreateAgentsFileClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        try
+        {
+            if (sender is not MenuItem menu) return;
+            var item = menu.CommandParameter as FileTreeItem ?? menu.DataContext as FileTreeItem;
+            if (item is null) return;
+            if (!item.IsDirectory) return;
+
+            var folder = item.FullPath;
+            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            {
+                AppendCliLog("System: Cannot locate folder for AGENTS.md.");
+                return;
+            }
+
+            var targetPath = Path.Combine(folder, "AGENTS.md");
+            var existed = File.Exists(targetPath);
+            if (!existed)
+            {
+                var template = "# AGENTS.md\n\n" +
+                    "Use this file to give Codex CLI directory-specific guidance.\n" +
+                    "Describe coding style, testing commands, or any constraints that apply to files under this folder.\n\n" +
+                    "## Guidelines\n" +
+                    "- List the expectations the agent must follow.\n" +
+                    "- Mention how to run or scope tests for this area.\n" +
+                    "- Note naming conventions, file layout rules, or things to avoid.\n\n" +
+                    "## Notes\n" +
+                    "These instructions apply to **" + Path.GetFileName(folder) + "** and all subdirectories.\n" +
+                    "If you add more specific AGENTS.md files deeper in the tree, those take precedence.";
+
+                await File.WriteAllTextAsync(targetPath, template);
+
+                var rel = !string.IsNullOrWhiteSpace(CurrentWorkspacePath)
+                    ? Path.GetRelativePath(CurrentWorkspacePath, targetPath)
+                    : targetPath;
+                AppendCliLog($"System: Created AGENTS.md at {rel}.");
+            }
+            else
+            {
+                var rel = !string.IsNullOrWhiteSpace(CurrentWorkspacePath)
+                    ? Path.GetRelativePath(CurrentWorkspacePath, targetPath)
+                    : targetPath;
+                AppendCliLog($"System: AGENTS.md already exists at {rel}; opening.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(CurrentWorkspacePath))
+            {
+                LoadTree(CurrentWorkspacePath);
+            }
+
+            _selectedFilePath = targetPath;
+            SelectedFileName = Path.GetFileName(targetPath);
+            await LoadSelectedFileAsync(targetPath);
+        }
+        catch (Exception ex)
+        {
+            AppendCliLog("System: Failed to create AGENTS.md: " + ex.Message);
+        }
+    }
+
+    private void OnPromptsButtonClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        try
+        {
+            if (sender is not Button button) return;
+            var prompts = LoadPromptEntries(out var dir);
+            if (prompts.Count == 0)
+            {
+                AppendCliLog($"System: No prompts found (expected in {dir}).");
+                return;
+            }
+
+            var flyout = new MenuFlyout();
+            foreach (var prompt in prompts)
+            {
+                var item = new MenuItem
+                {
+                    Header = prompt.Display,
+                    Tag = prompt.Command
+                };
+                item.Click += OnPromptMenuItemClick;
+                flyout.Items.Add(item);
+            }
+            flyout.ShowAt(button);
+        }
+        catch (Exception ex)
+        {
+            AppendCliLog("System: Unable to load prompts: " + ex.Message);
+        }
+    }
+
+    private async void OnPromptMenuItemClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menu) return;
+        var command = menu.Tag as string;
+        if (string.IsNullOrWhiteSpace(command)) return;
+        if (!_cli.IsRunning)
+        {
+            AppendCliLog("System: CLI session not running; cannot send prompt.");
+            return;
+        }
+
+        var label = menu.Header?.ToString() ?? command;
+        AppendCliLog($"System: Sending prompt '{label}'.");
+        CliInput = command;
+        await SendCliInputAsync();
+    }
+
+    private List<(string Display, string Command)> LoadPromptEntries(out string directory)
+    {
+        var results = new List<(string, string)>();
+        directory = Services.CodexConfigService.GetPromptsDirectory();
+        try
+        {
+            if (!Directory.Exists(directory)) return results;
+            var files = Directory.EnumerateFiles(directory, "*.md", SearchOption.TopDirectoryOnly)
+                .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var file in files)
+            {
+                var name = Path.GetFileName(file);
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                var display = name.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ? name[..^3] : name;
+                var command = "/" + name;
+                results.Add((display, command));
+            }
+        }
+        catch { }
+        return results;
+    }
+
+    private async void OnDeleteTreeItemClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menu) return;
+        var item = menu.CommandParameter as FileTreeItem ?? menu.DataContext as FileTreeItem;
+        if (item is null) return;
+
+        var path = item.FullPath;
+        if (string.IsNullOrWhiteSpace(path)) return;
+        var normalizedPath = NormalizePath(path);
+        var normalizedWorkspace = !string.IsNullOrWhiteSpace(CurrentWorkspacePath)
+            ? NormalizePath(CurrentWorkspacePath)
+            : null;
+        if (normalizedWorkspace != null && string.Equals(normalizedWorkspace, normalizedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            AppendCliLog("System: Cannot delete the workspace root from the tree.");
+            return;
+        }
+
+        var targetName = item.Name;
+        if (string.IsNullOrWhiteSpace(targetName)) targetName = Path.GetFileName(path);
+        if (string.IsNullOrWhiteSpace(targetName)) targetName = path;
+
+        var confirm = new Views.ConfirmDialog
+        {
+            Title = "Delete",
+            Message = $"Delete '{targetName}'?\nThis action cannot be undone."
+        };
+        var result = await confirm.ShowDialog<bool>(this);
+        if (!result) return;
+
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+                AppendCliLog($"System: Deleted folder '{targetName}'.");
+            }
+            else if (File.Exists(path))
+            {
+                File.Delete(path);
+                AppendCliLog($"System: Deleted file '{targetName}'.");
+            }
+            else
+            {
+                AppendCliLog($"System: '{targetName}' no longer exists.");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendCliLog("System: Delete failed: " + ex.Message);
+            return;
+        }
+
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(_selectedFilePath) && string.Equals(NormalizePath(_selectedFilePath), normalizedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _selectedFilePath = null;
+                SelectedFileName = string.Empty;
+                CurrentFileDocument.Text = string.Empty;
+            }
+        }
+        catch { }
+
+        if (!string.IsNullOrWhiteSpace(CurrentWorkspacePath))
+        {
+            LoadTree(CurrentWorkspacePath);
+        }
+    }
+
     private async void OnTreeSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         try
@@ -1270,9 +1559,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     text = await sr.ReadToEndAsync();
                 }
                 if (Dispatcher.UIThread.CheckAccess())
+                {
                     CurrentFileDocument.Text = text;
+                    ResetEditorViewport(_editorCurrent);
+                    ResetEditorViewport(_editorCurrent2);
+                }
                 else
-                    Dispatcher.UIThread.Post(() => CurrentFileDocument.Text = text);
+                {
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        CurrentFileDocument.Text = text;
+                        ResetEditorViewport(_editorCurrent);
+                        ResetEditorViewport(_editorCurrent2);
+                    });
+                }
                 UpdateSingleDiffGutter();
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
@@ -1304,6 +1604,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (Dispatcher.UIThread.CheckAccess())
             {
                 BaseFileDocument.Text = string.Empty;
+                ResetEditorViewport(_editorBase);
                 if (_imageBase != null) { _imageBase.IsVisible = false; _imageBase.Source = null; }
                 if (_editorBase != null) _editorBase.IsVisible = true;
             }
@@ -1312,6 +1613,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 Dispatcher.UIThread.Post(() =>
                 {
                     BaseFileDocument.Text = string.Empty;
+                    ResetEditorViewport(_editorBase);
                     if (_imageBase != null) { _imageBase.IsVisible = false; _imageBase.Source = null; }
                     if (_editorBase != null) _editorBase.IsVisible = true;
                 });
@@ -1322,9 +1624,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (string.IsNullOrWhiteSpace(_selectedFilePath))
         {
             if (Dispatcher.UIThread.CheckAccess())
+            {
                 BaseFileDocument.Text = string.Empty;
+                ResetEditorViewport(_editorBase);
+            }
             else
-                Dispatcher.UIThread.Post(() => BaseFileDocument.Text = string.Empty);
+                Dispatcher.UIThread.Post(() =>
+                {
+                    BaseFileDocument.Text = string.Empty;
+                    ResetEditorViewport(_editorBase);
+                });
             return;
         }
 
@@ -1352,6 +1661,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                             catch (Exception ex)
                             {
                                 BaseFileDocument.Text = $"Failed to load base image: {ex.Message}";
+                                ResetEditorViewport(_editorBase);
                                 if (_imageBase != null) { _imageBase.IsVisible = false; _imageBase.Source = null; }
                                 if (_editorBase != null) _editorBase.IsVisible = true;
                             }
@@ -1362,6 +1672,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                         Dispatcher.UIThread.Post(() =>
                         {
                             BaseFileDocument.Text = $"No HEAD version available: {errImg}";
+                            ResetEditorViewport(_editorBase);
                             if (_imageBase != null) { _imageBase.IsVisible = false; _imageBase.Source = null; }
                             if (_editorBase != null) _editorBase.IsVisible = true;
                         });
@@ -1378,8 +1689,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 {
                     var (ok, content, error) = Services.GitHelper.TryReadTextAtHead(_selectedFilePath!);
                     var text = ok ? (content ?? string.Empty) : $"No HEAD version available: {error}";
-                    if (Dispatcher.UIThread.CheckAccess()) BaseFileDocument.Text = text;
-                    else Dispatcher.UIThread.Post(() => BaseFileDocument.Text = text);
+                    if (Dispatcher.UIThread.CheckAccess())
+                    {
+                        BaseFileDocument.Text = text;
+                        ResetEditorViewport(_editorBase);
+                    }
+                    else
+                    {
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            BaseFileDocument.Text = text;
+                            ResetEditorViewport(_editorBase);
+                        });
+                    }
 
                     // Compute diff sets for gutters
                     var (dok, baseDeleted, currentAdded, derr) = Services.GitHelper.TryGetLineDiffSets(_selectedFilePath!);
@@ -1407,8 +1729,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
             catch (Exception ex)
             {
-                if (Dispatcher.UIThread.CheckAccess()) BaseFileDocument.Text = $"Failed to read from git: {ex.Message}";
-                else Dispatcher.UIThread.Post(() => BaseFileDocument.Text = $"Failed to read from git: {ex.Message}");
+                if (Dispatcher.UIThread.CheckAccess())
+                {
+                    BaseFileDocument.Text = $"Failed to read from git: {ex.Message}";
+                    ResetEditorViewport(_editorBase);
+                }
+                else Dispatcher.UIThread.Post(() =>
+                {
+                    BaseFileDocument.Text = $"Failed to read from git: {ex.Message}";
+                    ResetEditorViewport(_editorBase);
+                });
             }
         });
     }
@@ -1501,6 +1831,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private static string NormalizePath(string p)
         => Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+    private void ResetEditorViewport(TextEditor? editor)
+    {
+        if (editor is null) return;
+        try
+        {
+            editor.Select(0, 0);
+            if ((editor.Document?.LineCount ?? 0) > 0)
+                editor.ScrollTo(1, 0);
+            else
+                editor.ScrollToHome();
+            editor.TextArea.Caret.BringCaretToView();
+        }
+        catch { }
+    }
 
     private void TrySetupEditors()
     {
@@ -2321,6 +2666,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         CliLog = string.Empty;
         try { CliLogDocument.Text = string.Empty; } catch { }
+        _logAutoScroll = true;
+        try { _logEditor?.ScrollToHome(); } catch { }
     }
 
     private void OnOpenInFileManagerClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -2379,6 +2726,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _settings.ShowMcpResultsInLog = result.ShowMcpResultsInLog;
         _settings.ShowMcpResultsOnlyWhenNoEdits = result.ShowMcpResultsOnlyWhenNoEdits;
         _settings.SelectedProfile = result.SelectedProfile ?? string.Empty;
+        SelectedProfile = _settings.SelectedProfile;
         _cli.UseApiKey = _settings.UseApiKey;
         _cli.ApiKey = string.IsNullOrWhiteSpace(_settings.ApiKey) ? null : _settings.ApiKey;
         SettingsService.Save(_settings);

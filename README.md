@@ -38,9 +38,16 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
    - Verbose logging (show suppressed output)
    - Enable MCP support (loads MCP servers from your JSON config and passes them directly to Codex)
      - Config path: `~/.config/SemanticDeveloper/mcp_servers.json` (Linux/macOS) or `%AppData%/SemanticDeveloper/mcp_servers.json` (Windows)
-  - Use API Key for Codex CLI (runs `codex login --api-key <key>` before sessions; does not rely on existing CLI auth)
+ - Use API Key for Codex CLI (runs `codex login --api-key <key>` before sessions; does not rely on existing CLI auth)
   - Allow network access for tools (sets sandbox_policy.network_access=true on turns so MCP tools can reach the network)
   - Without API key enabled, the app proactively authenticates with `codex auth login` (falling back to `codex login`) before sessions so your chat/GPT token is used.
+
+### Directory Guardrails with `AGENTS.md`
+
+- Right-click any folder in the workspace tree and choose **Create AGENTS.md** to seed a directory-specific instruction file.
+- The file is created inside the chosen folder (or opened if it already exists) and loaded into the editor so you can tailor the guidance.
+- Codex CLI automatically honors the closest `AGENTS.md` when editing files: deeper files override parent folders, and rules apply to the entire subtree beneath the file.
+- Use these files to capture coding conventions, test commands, or “do/don’t” rules that the agent must follow for that part of the repo.
 
 ### Profiles (config.toml) example
 
@@ -169,6 +176,11 @@ Notes
   - Restart ends the current process and starts a fresh session in the same workspace.
 
 - Clear Log clears both the on‑screen log and the underlying editor document; it does not affect the session.
+
+- Prompts button (bottom-right toolbar):
+  - Lists every markdown prompt file in `$CODEX_HOME/prompts` (defaults to `~/.codex/prompts`).
+  - Selecting a prompt sends `/filename.md` through the active session—exactly like typing it in the CLI—without leaving the UI.
+  - Prompts are sorted alphabetically; create or edit them directly on disk.
 
 ## MCP Servers Panel
 
