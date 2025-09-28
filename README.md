@@ -1,5 +1,7 @@
 # Semantic Developer
 
+![Semantic Developer Img](/SemanticDeveloper/SemanticDeveloper/Images/SemanticDeveloperLogo.ico)
+
 A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using its JSON protocol. It lets you:
 
 - Select a workspace folder and browse files via a lazy file tree
@@ -225,7 +227,7 @@ Selection behavior:
 
 ## Project Layout
 
-- `SemanticDeveloper/` — App source (UI, services, models). This README lives here.
+- `SemanticDeveloper/` — App source (UI, services, models).
 - `proto-reference/` — Rust protocol reference for Codex (not built by this project). Includes MCP/client protocol shapes.
 
 ## Notes

@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\README.md" Link="README.md" CopyToOutputDirectory="PreserveNewest" />
     <None Include="build.ps1" CopyToOutputDirectory="PreserveNewest" />
     <None Include="SemanticDeveloper.iss" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
