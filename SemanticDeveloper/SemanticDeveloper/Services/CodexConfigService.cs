@@ -23,6 +23,22 @@ public static class CodexConfigService
         }
     }
 
+    public static string GetPromptsDirectory()
+    {
+        try
+        {
+            var home = Environment.GetEnvironmentVariable("CODEX_HOME");
+            string dir;
+            if (!string.IsNullOrWhiteSpace(home)) dir = home!;
+            else dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+            return Path.Combine(dir, "prompts");
+        }
+        catch
+        {
+            return Path.Combine(Directory.GetCurrentDirectory(), "prompts");
+        }
+    }
+
     public static List<string> TryGetProfiles()
     {
         var result = new List<string>();
