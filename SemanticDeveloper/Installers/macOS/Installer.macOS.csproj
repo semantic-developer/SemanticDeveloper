@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\README.md" Link="README.md" CopyToOutputDirectory="PreserveNewest" />
     <None Include="create_dmg.sh" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Info.plist" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
@@ -19,4 +19,3 @@
     <Message Text="Run create_dmg.sh on macOS to build .app and .dmg." Importance="High" />
   </Target>
 </Project>
-

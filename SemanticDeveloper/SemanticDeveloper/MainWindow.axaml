@@ -61,7 +61,7 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*" MinWidth="425"/>
+                <ColumnDefinition Width="*" MinWidth="520"/>
             </Grid.ColumnDefinitions>
             <!-- Left: directory tree -->
             <Border BorderBrush="#333" BorderThickness="0,0,1,0" Background="#1F1F1F">
@@ -238,7 +238,7 @@
                           ResizeDirection="Columns" ShowsPreview="True"/>
 
             <!-- Right: CLI session area -->
-            <Grid x:Name="RightPaneGrid" Grid.Column="4" RowDefinitions="Auto,Auto,*,Auto" MinWidth="440" SizeChanged="OnRightPaneSizeChanged">
+            <Grid x:Name="RightPaneGrid" Grid.Column="4" RowDefinitions="Auto,Auto,*,Auto" MinWidth="525" SizeChanged="OnRightPaneSizeChanged">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Top" Margin="10" Spacing="8">
                     <TextBlock FontWeight="SemiBold" Text="Codex CLI Session"/>
                     <TextBlock Text="—"/>
