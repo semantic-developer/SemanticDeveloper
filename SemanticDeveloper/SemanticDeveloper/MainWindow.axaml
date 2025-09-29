@@ -102,9 +102,9 @@
                     </TreeView>
                     <!-- Splitter between file tree and MCP tools panel -->
                     <GridSplitter Grid.Row="2" Height="5" Background="#2A2A2A" HorizontalAlignment="Stretch"
-                                  ResizeDirection="Rows" IsVisible="{Binding IsMcpEnabled}"/>
+                                  ResizeDirection="Rows"/>
                     <!-- MCP servers + tools panel -->
-                    <Border Grid.Row="3" Background="#1B1B1B" BorderBrush="#333" BorderThickness="1,1,0,0" Padding="8" IsVisible="{Binding IsMcpEnabled}">
+                    <Border Grid.Row="3" Background="#1B1B1B" BorderBrush="#333" BorderThickness="1,1,0,0" Padding="8">
                         <Grid RowDefinitions="Auto,*">
                             <!-- Header with gear + refresh -->
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="0,0,0,6">
@@ -119,29 +119,37 @@
 
                             <!-- Combined servers + tools with vertical scroll -->
                             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0">
-                                <ItemsControl ItemsSource="{Binding McpServers}" HorizontalAlignment="Stretch">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Expander IsExpanded="False" Padding="0" Margin="0,2,0,2" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                                                <Expander.Header>
-                                                    <Grid ColumnDefinitions="Auto,6,*" Margin="0">
-                                                        <!-- Slightly smaller checkbox to reduce visual weight -->
-                                                        <CheckBox Grid.Column="0" IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center" FontSize="10"/>
-                                                        <Border Grid.Column="1"/>
-                                                        <TextBlock Grid.Column="2" Text="{Binding Name}" VerticalAlignment="Center"/>
-                                                    </Grid>
-                                                </Expander.Header>
-                                                <ItemsControl ItemsSource="{Binding Tools}" Margin="0,2,0,0" HorizontalAlignment="Stretch">
-                                                    <ItemsControl.ItemTemplate>
-                                                        <DataTemplate>
-                                                            <TextBlock Text="{Binding Short}" ToolTip.Tip="{Binding Full}" Margin="16,0,0,0"/>
-                                                        </DataTemplate>
-                                                    </ItemsControl.ItemTemplate>
-                                                </ItemsControl>
-                                            </Expander>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                <StackPanel HorizontalAlignment="Stretch" Spacing="6">
+                                    <TextBlock TextWrapping="Wrap" Foreground="#AAAAAA" FontSize="12"
+                                               Text="No MCP servers configured yet. Click ⚙ to open mcp_servers.json and add your servers using Semantic Developer's JSON format."
+                                               IsVisible="{Binding HasNoMcpServers}"/>
+                                    <TextBlock TextWrapping="Wrap" Foreground="#AAAAAA" FontSize="12"
+                                               Text="MCP support is currently disabled. Enable it under CLI Settings so selected servers are passed to Codex."
+                                               IsVisible="{Binding IsMcpDisabled}"/>
+                                    <ItemsControl ItemsSource="{Binding McpServers}" HorizontalAlignment="Stretch">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Expander IsExpanded="False" Padding="0" Margin="0,2,0,2" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                                    <Expander.Header>
+                                                        <Grid ColumnDefinitions="Auto,6,*" Margin="0">
+                                                            <!-- Slightly smaller checkbox to reduce visual weight -->
+                                                            <CheckBox Grid.Column="0" IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center" FontSize="10"/>
+                                                            <Border Grid.Column="1"/>
+                                                            <TextBlock Grid.Column="2" Text="{Binding Name}" VerticalAlignment="Center"/>
+                                                        </Grid>
+                                                    </Expander.Header>
+                                                    <ItemsControl ItemsSource="{Binding Tools}" Margin="0,2,0,0" HorizontalAlignment="Stretch">
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <TextBlock Text="{Binding Short}" ToolTip.Tip="{Binding Full}" Margin="16,0,0,0"/>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                </Expander>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
                             </ScrollViewer>
                         </Grid>
                     </Border>
