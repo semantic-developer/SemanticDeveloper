@@ -50,6 +50,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
 - The file is created inside the chosen folder (or opened if it already exists) and loaded into the editor so you can tailor the guidance.
 - Codex CLI automatically honors the closest `AGENTS.md` when editing files: deeper files override parent folders, and rules apply to the entire subtree beneath the file.
 - Use these files to capture coding conventions, test commands, or “do/don’t” rules that the agent must follow for that part of the repo.
+- Learn more about the convention at [agents.md](https://agents.md/).
 
 ### Profiles (config.toml) example
 
@@ -197,6 +198,8 @@ Notes
 Config file location:
 - Linux/macOS: `~/.config/SemanticDeveloper/mcp_servers.json`
 - Windows: `%AppData%/SemanticDeveloper/mcp_servers.json`
+
+> Unlike the Codex CLI's `config.toml`, which may also list MCP servers, the app only reads from `mcp_servers.json`. Keep your server command/argument definitions in this JSON file so Semantic Developer can surface them in the UI and pass them to Codex automatically. Profiles still live in `config.toml`, but MCP server wiring should follow the Semantic Developer format.
 
 Selection behavior:
 - The checkbox state in the MCP pane determines which servers are passed to Codex at session start.

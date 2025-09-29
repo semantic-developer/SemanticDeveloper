@@ -108,6 +108,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         DataContext = this;
 
+        McpServers.CollectionChanged += (_, __) =>
+        {
+            OnPropertyChanged(nameof(HasMcpServers));
+            OnPropertyChanged(nameof(HasNoMcpServers));
+        };
+
         // Capture Enter/Shift+Enter on the CLI input box before default handling
         try
         {
@@ -216,6 +222,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
         }
         catch { }
+
+        OnPropertyChanged(nameof(HasMcpServers));
+        OnPropertyChanged(nameof(HasNoMcpServers));
     }
 
     private async void OnCliInputPreviewKeyDown(object? sender, KeyEventArgs e)
@@ -289,8 +298,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool IsMcpEnabled
     {
         get => _mcpEnabled;
-        set { if (_mcpEnabled == value) return; _mcpEnabled = value; OnPropertyChanged(); }
+        set
+        {
+            if (_mcpEnabled == value) return;
+            _mcpEnabled = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(IsMcpDisabled));
+        }
     }
+
+    public bool IsMcpDisabled => !_mcpEnabled;
+
+    public bool HasMcpServers => McpServers.Count > 0;
+    public bool HasNoMcpServers => McpServers.Count == 0;
 
     // Exposed tool names for the MCP panel
     public ObservableCollection<string> McpToolNames { get; } = new();
@@ -1232,7 +1252,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             if (CodexVersionService.IsNewer(latest.Version, installed.Version))
             {
-                AppendCliLog($"System: Codex {latest.Version} is available (installed {installed.Version}). Run 'codex update' to upgrade.");
+                AppendCliLog($"System: Codex {latest.Version} is available (installed {installed.Version}). Update with 'npm install -g @openai/codex@latest' or 'brew upgrade codex'.");
             }
         }
         catch
@@ -2774,23 +2794,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         try
         {
-            var baseDir = AppContext.BaseDirectory;
-            var candidates = new[] { "README.md", "README.txt", "README" };
-            foreach (var name in candidates)
+            const string readmeUrl = "https://github.com/semantic-developer/SemanticDeveloper?tab=readme-ov-file";
+            if (OperatingSystem.IsWindows())
             {
-                var p = System.IO.Path.Combine(baseDir, name);
-                if (System.IO.File.Exists(p))
-                {
-                    if (OperatingSystem.IsWindows())
-                        Process.Start(new ProcessStartInfo { FileName = p, UseShellExecute = true });
-                    else if (OperatingSystem.IsMacOS())
-                        Process.Start("open", p);
-                    else
-                        Process.Start("xdg-open", p);
-                    return;
-                }
+                Process.Start(new ProcessStartInfo { FileName = readmeUrl, UseShellExecute = true });
             }
-            AppendCliLog("System: README not found in output directory.");
+            else if (OperatingSystem.IsMacOS())
+            {
+                Process.Start("open", readmeUrl);
+            }
+            else
+            {
+                Process.Start("xdg-open", readmeUrl);
+            }
         }
         catch (Exception ex)
         {
