@@ -64,6 +64,22 @@ public static class CodexVersionService
                 CreateNoWindow = true
             };
 
+            return await TryGetInstalledVersionAsync(psi);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
+    public static async Task<(bool Ok, string? Version, string? Error)> TryGetInstalledVersionAsync(ProcessStartInfo psi)
+    {
+        try
+        {
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.UseShellExecute = false;
+
             using var process = Process.Start(psi);
             if (process is null) return (false, null, "Failed to start Codex CLI");
 

@@ -11,4 +11,5 @@ public class AppSettings
     public bool ShowMcpResultsInLog { get; set; } = true;
     public bool ShowMcpResultsOnlyWhenNoEdits { get; set; } = true;
     public string SelectedProfile { get; set; } = string.Empty;
+    public bool UseWsl { get; set; } = false;
 }

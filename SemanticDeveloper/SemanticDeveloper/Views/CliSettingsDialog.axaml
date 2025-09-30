@@ -17,6 +17,12 @@
                 <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Profiles from config.toml (e.g., ~/.codex/config.toml)." MaxWidth="550" TextWrapping="Wrap"/>
             </StackPanel>
             <CheckBox Content="Verbose logging (show suppressed content)" IsChecked="{Binding VerboseLoggingEnabled, Mode=TwoWay}"/>
+            <StackPanel>
+                <CheckBox Content="Run Codex CLI inside WSL" IsChecked="{Binding UseWsl, Mode=TwoWay}" IsEnabled="{Binding CanUseWsl}"/>
+                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12"
+                           Text="Windows only. When enabled, Codex runs via wsl.exe so the workspace must be accessible under /mnt/."
+                           MaxWidth="550" TextWrapping="Wrap"/>
+            </StackPanel>
             <Separator/>
             <StackPanel>
                 <CheckBox Content="Use API Key for Codex CLI" IsChecked="{Binding UseApiKey, Mode=TwoWay}"/>
