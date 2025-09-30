@@ -39,20 +39,29 @@ public static class SettingsService
                         settings.ShowMcpResultsInLog = true;
                     if (obj != null && obj.Property("ShowMcpResultsOnlyWhenNoEdits") == null)
                         settings.ShowMcpResultsOnlyWhenNoEdits = true;
+                    if (obj != null && obj.Property("UseWsl") == null)
+                        settings.UseWsl = false;
                 }
                 catch { }
+                if (!OperatingSystem.IsWindows())
+                    settings.UseWsl = false;
                 _loadedPath = path;
                 return settings;
             }
         }
         catch { }
-        return new AppSettings();
+        var fresh = new AppSettings();
+        if (!OperatingSystem.IsWindows())
+            fresh.UseWsl = false;
+        return fresh;
     }
 
     public static void Save(AppSettings settings)
     {
         try
         {
+            if (!OperatingSystem.IsWindows())
+                settings.UseWsl = false;
             var path = _loadedPath ?? FilePathApp;
             var dir = Path.GetDirectoryName(path)!;
             Directory.CreateDirectory(dir);

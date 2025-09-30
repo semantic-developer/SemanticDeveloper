@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Linq;
+using System.IO;
 
 namespace SemanticDeveloper.Services;
 
@@ -13,6 +15,7 @@ public class CodexCliService
     public string Command { get; set; } = "codex"; // Assumes codex CLI is on PATH
     public bool UseProto => true;                   // Always use --proto for this app
     public string AdditionalArgs { get; set; } = string.Empty; // Extra CLI args if needed
+    public bool UseWsl { get; set; } = false;        // Windows: run via wsl.exe when true
     public bool IsRunning => _process is { HasExited: false };
     public bool UseApiKey { get; set; } = false;
     public string? ApiKey { get; set; }
@@ -31,24 +34,21 @@ public class CodexCliService
         // Force proto subcommand per environment ("codex proto")
         var mode = ProtoMode.Subcommand;
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = Command,
-            WorkingDirectory = workspacePath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            RedirectStandardInput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        // Build argument tokens to avoid shell-quoting pitfalls
         var tokens = BuildArgumentTokens(mode, AdditionalArgs);
-        foreach (var t in tokens)
-            psi.ArgumentList.Add(t);
+        var effectiveWorkspace = string.IsNullOrWhiteSpace(workspacePath) ? Directory.GetCurrentDirectory() : workspacePath;
+        var psi = await BuildProcessStartInfoAsync(effectiveWorkspace, tokens, redirectStdIn: true);
 
         // Do not inject API key via environment. Authentication is handled via an explicit
         // 'codex login --api-key' flow before starting the proto session.
+
+        // Emit the exact command being launched to the debug console (not UI)
+        try
+        {
+            var rendered = RenderCommandForDisplay(psi.FileName, psi.ArgumentList.Cast<string>(), psi.WorkingDirectory);
+            Debug.WriteLine($"[CodexCLI] {rendered}");
+            Trace.WriteLine($"[CodexCLI] {rendered}");
+        }
+        catch { }
 
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
         p.OutputDataReceived += (_, e) => { if (e.Data != null) OutputReceived?.Invoke(this, e.Data); };
@@ -126,14 +126,14 @@ public class CodexCliService
 
         try
         {
-            var (codeFlag, _, _) = await RunArgsAsync("--proto --help", workingDir);
+            var (codeFlag, _, _) = await RunArgsAsync(new[] { "--proto", "--help" }, workingDir);
             if (codeFlag == 0)
             {
                 _detectedMode = ProtoMode.Flag;
                 return _detectedMode.Value;
             }
 
-            var (codeSub, _, _) = await RunArgsAsync("proto --help", workingDir);
+            var (codeSub, _, _) = await RunArgsAsync(new[] { "proto", "--help" }, workingDir);
             if (codeSub == 0)
             {
                 _detectedMode = ProtoMode.Subcommand;
@@ -159,19 +159,11 @@ public class CodexCliService
 
     private async Task<string> RunHelpTextAsync(string workingDir)
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = Command,
-            Arguments = "--help",
-            WorkingDirectory = workingDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
         try
         {
-            using var p = Process.Start(psi)!;
+            var psi = await BuildProcessStartInfoAsync(workingDir, new[] { "--help" }, redirectStdIn: false);
+            using var p = Process.Start(psi);
+            if (p is null) return string.Empty;
             var stdout = await p.StandardOutput.ReadToEndAsync();
             var stderr = await p.StandardError.ReadToEndAsync();
             await p.WaitForExitAsync();
@@ -183,24 +175,120 @@ public class CodexCliService
         }
     }
 
-    private async Task<(int Exit, string Stdout, string Stderr)> RunArgsAsync(string args, string workingDir)
+    private async Task<(int Exit, string Stdout, string Stderr)> RunArgsAsync(IEnumerable<string> args, string workingDir)
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = Command,
-            Arguments = args,
-            WorkingDirectory = workingDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+        var psi = await BuildProcessStartInfoAsync(workingDir, args, redirectStdIn: false);
         using var p = new Process { StartInfo = psi };
         p.Start();
         var stdout = await p.StandardOutput.ReadToEndAsync();
         var stderr = await p.StandardError.ReadToEndAsync();
         await p.WaitForExitAsync();
         return (p.ExitCode, stdout, stderr);
+    }
+
+    internal async Task<ProcessStartInfo> BuildProcessStartInfoAsync(string workingDir, IEnumerable<string> commandArgs, bool redirectStdIn, bool redirectStdOut = true, bool redirectStdErr = true)
+    {
+        var effectiveDir = string.IsNullOrWhiteSpace(workingDir) ? Directory.GetCurrentDirectory() : workingDir;
+        var psi = new ProcessStartInfo
+        {
+            WorkingDirectory = effectiveDir,
+            RedirectStandardInput = redirectStdIn,
+            RedirectStandardOutput = redirectStdOut,
+            RedirectStandardError = redirectStdErr,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        if (UseWsl && OperatingSystem.IsWindows())
+        {
+            var wslDir = await TranslatePathToWslAsync(effectiveDir);
+            psi.FileName = "wsl";
+            if (!string.IsNullOrWhiteSpace(wslDir))
+            {
+                psi.ArgumentList.Add("--cd");
+                psi.ArgumentList.Add(wslDir);
+            }
+            psi.ArgumentList.Add("--exec");
+            psi.ArgumentList.Add(Command);
+        }
+        else
+        {
+            psi.FileName = Command;
+        }
+
+        foreach (var arg in commandArgs ?? Array.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(arg)) continue;
+            var normalized = NormalizeToken(arg);
+            if (string.IsNullOrWhiteSpace(normalized)) continue;
+            psi.ArgumentList.Add(normalized);
+        }
+
+        return psi;
+    }
+
+    private async Task<string> TranslatePathToWslAsync(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return "/";
+        if (!UseWsl || !OperatingSystem.IsWindows()) return path;
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "wsl",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("wslpath");
+            psi.ArgumentList.Add("-a");
+            psi.ArgumentList.Add(path);
+
+            using var proc = Process.Start(psi);
+            if (proc != null)
+            {
+                var stdout = await proc.StandardOutput.ReadToEndAsync();
+                await proc.WaitForExitAsync();
+                if (proc.ExitCode == 0)
+                {
+                    var converted = stdout.Trim();
+                    if (!string.IsNullOrWhiteSpace(converted))
+                        return converted.Replace('\\', '/');
+                }
+            }
+        }
+        catch { }
+
+        return FallbackWindowsPathToWsl(path);
+    }
+
+    private static string FallbackWindowsPathToWsl(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return "/";
+        var trimmed = path.Trim();
+        var normalized = trimmed.Replace('\\', '/');
+        if (normalized.Length >= 2 && normalized[1] == ':' && char.IsLetter(normalized[0]))
+        {
+            var drive = char.ToLowerInvariant(normalized[0]);
+            var rest = normalized.Substring(2).TrimStart('/');
+            return rest.Length == 0 ? $"/mnt/{drive}" : $"/mnt/{drive}/{rest}";
+        }
+        return normalized.StartsWith('/') ? normalized : "/" + normalized.TrimStart('/');
+    }
+
+    private static string NormalizeToken(string token)
+    {
+        if (string.IsNullOrEmpty(token)) return token;
+        if (token.Length >= 2)
+        {
+            var first = token[0];
+            var last = token[^1];
+            if ((first == '"' && last == '"') || (first == '\'' && last == '\''))
+                return token.Substring(1, token.Length - 2);
+        }
+        return token;
     }
 
     private static List<string> BuildArgumentTokens(ProtoMode mode, string? additional)
@@ -216,6 +304,22 @@ public class CodexCliService
             tokens.AddRange(SplitArgsRespectingQuotes(additional!));
         }
         return tokens;
+    }
+
+    private static string RenderCommandForDisplay(string fileName, IEnumerable<string> args, string workingDir)
+    {
+        static string Quote(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "\"\"";
+            bool needs = s.Any(char.IsWhiteSpace);
+            if (!needs) return s;
+            var escaped = s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            return "\"" + escaped + "\"";
+        }
+
+        var joined = string.Join(" ", new[] { fileName }.Concat(args.Select(Quote)));
+        var prefix = string.IsNullOrWhiteSpace(workingDir) ? string.Empty : (workingDir + "$ ");
+        return prefix + joined;
     }
 
     private static IEnumerable<string> SplitArgsRespectingQuotes(string input)

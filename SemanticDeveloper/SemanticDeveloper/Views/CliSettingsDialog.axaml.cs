@@ -1,3 +1,4 @@
+using System;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 
@@ -15,6 +16,8 @@ public class CliSettings
     public bool ShowMcpResultsOnlyWhenNoEdits { get; set; } = true;
     public System.Collections.Generic.List<string> Profiles { get; set; } = new();
     public string SelectedProfile { get; set; } = string.Empty;
+    public bool UseWsl { get; set; } = false;
+    public bool CanUseWsl { get; set; } = OperatingSystem.IsWindows();
 }
 
 public partial class CliSettingsDialog : Window

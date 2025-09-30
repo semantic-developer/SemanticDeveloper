@@ -156,7 +156,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _cli.Command = _settings.Command;
         _cli.UseApiKey = _settings.UseApiKey;
         _cli.ApiKey = string.IsNullOrWhiteSpace(_settings.ApiKey) ? null : _settings.ApiKey;
-        AppendCliLog($"System: Loaded CLI settings: '{_cli.Command}'{(string.IsNullOrWhiteSpace(_settings.SelectedProfile)?"":" • profile=" + _settings.SelectedProfile)}");
+        _cli.UseWsl = OperatingSystem.IsWindows() && _settings.UseWsl;
+        var loadProfileSuffix = string.IsNullOrWhiteSpace(_settings.SelectedProfile) ? string.Empty : " • profile=" + _settings.SelectedProfile;
+        var loadWslSuffix = _cli.UseWsl ? " • WSL" : string.Empty;
+        AppendCliLog($"System: Loaded CLI settings: '{_cli.Command}'{loadProfileSuffix}{loadWslSuffix}");
         SelectedProfile = _settings.SelectedProfile;
         _currentModel = TryExtractModelFromArgs(_cli.AdditionalArgs);
         _verboseLogging = _settings.VerboseLoggingEnabled;
@@ -1247,7 +1250,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var latest = CodexVersionService.TryReadLatestVersion();
             if (!latest.Ok || string.IsNullOrWhiteSpace(latest.Version)) return;
 
-            var installed = await CodexVersionService.TryGetInstalledVersionAsync(_cli.Command, CurrentWorkspacePath ?? Directory.GetCurrentDirectory());
+            (bool Ok, string? Version, string? Error) installed;
+            if (_cli.UseWsl && OperatingSystem.IsWindows())
+            {
+                var psi = await _cli.BuildProcessStartInfoAsync(CurrentWorkspacePath ?? Directory.GetCurrentDirectory(), new[] { "--version" }, redirectStdIn: false);
+                installed = await CodexVersionService.TryGetInstalledVersionAsync(psi);
+            }
+            else
+            {
+                installed = await CodexVersionService.TryGetInstalledVersionAsync(_cli.Command, CurrentWorkspacePath ?? Directory.GetCurrentDirectory());
+            }
             if (!installed.Ok || string.IsNullOrWhiteSpace(installed.Version)) return;
 
             if (CodexVersionService.IsNewer(latest.Version, installed.Version))
@@ -2168,6 +2180,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _cli.AdditionalArgs = composed;
 
             // Proactive authentication: API key login or interactive chat login
+            // 1) If user provided API key in settings, use it non-interactively
             if (_cli.UseApiKey && !string.IsNullOrWhiteSpace(_cli.ApiKey))
             {
                 try
@@ -2196,28 +2209,40 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
             else
             {
-                try
+                // 2) No API key in settings: probe ~/.codex/auth.json
+                var authProbe = Services.CodexAuthService.ProbeAuth();
+                if (authProbe.Exists && authProbe.HasTokens)
                 {
-                    AppendCliLog("System: Authenticating CLI via 'codex login'…");
-                    var exit = await RunCodexAuthLoginAsync();
-                    if (exit == 0)
+                    // Tokens present — assume already authenticated; skip proactive login
+                    AppendCliLog("System: Found existing Codex auth tokens; skipping login.");
+                }
+                else
+                {
+                    // Regardless of API key present in auth.json, settings dictate NOT to use API key.
+                    // Fall back to interactive login to avoid implicit API key usage.
+                    try
                     {
-                        AppendCliLog("System: CLI authenticated (chat login).");
+                        AppendCliLog("System: Authenticating CLI via 'codex login'…");
+                        var exit = await RunCodexAuthLoginAsync();
+                        if (exit == 0)
+                        {
+                            AppendCliLog("System: CLI authenticated (chat login).");
+                        }
+                        else
+                        {
+                            AppendCliLog($"System: CLI login failed (exit {exit}).");
+                            _cli.AdditionalArgs = prevArgs; // restore before abort
+                            SessionStatus = "error";
+                            return;
+                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        AppendCliLog($"System: CLI login failed (exit {exit}).");
+                        AppendCliLog("System: CLI login error: " + ex.Message);
                         _cli.AdditionalArgs = prevArgs; // restore before abort
                         SessionStatus = "error";
                         return;
                     }
-                }
-                catch (Exception ex)
-                {
-                    AppendCliLog("System: CLI login error: " + ex.Message);
-                    _cli.AdditionalArgs = prevArgs; // restore before abort
-                    SessionStatus = "error";
-                    return;
                 }
             }
 
@@ -2489,24 +2514,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task<int> RunCodexAuthLoginAsync()
     {
-        var cwd = HasWorkspace ? CurrentWorkspacePath : Directory.GetCurrentDirectory();
+        var cwd = HasWorkspace && !string.IsNullOrWhiteSpace(CurrentWorkspacePath)
+            ? CurrentWorkspacePath!
+            : Directory.GetCurrentDirectory();
 
-        async Task<int> RunAsync(string args)
+        async Task<int> RunAsync(params string[] commandArgs)
         {
             try
             {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = _cli.Command,
-                    Arguments = args,
-                    WorkingDirectory = cwd!,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    RedirectStandardInput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
+                var psi = await _cli.BuildProcessStartInfoAsync(cwd, commandArgs, redirectStdIn: true);
                 using var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
 
                 void HandleLine(string? line)
@@ -2569,7 +2585,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         // Try modern subcommand first, then fallback
-        var exit = await RunAsync("auth login");
+        var exit = await RunAsync("auth", "login");
         if (exit == 0) return exit;
         // Fallback: some versions may use `login`
         return await RunAsync("login");
@@ -2577,23 +2593,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task<int> RunCodexLoginWithApiKeyAsync(string apiKey)
     {
-        var cwd = HasWorkspace ? CurrentWorkspacePath : Directory.GetCurrentDirectory();
+        var cwd = HasWorkspace && !string.IsNullOrWhiteSpace(CurrentWorkspacePath)
+            ? CurrentWorkspacePath!
+            : Directory.GetCurrentDirectory();
         try
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = _cli.Command,
-                WorkingDirectory = cwd!,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            // Prefer: codex login --api-key <key>
-            psi.ArgumentList.Add("login");
-            psi.ArgumentList.Add("--api-key");
-            psi.ArgumentList.Add(apiKey);
+            var psi = await _cli.BuildProcessStartInfoAsync(cwd, new[] { "login", "--api-key", apiKey }, redirectStdIn: false);
 
             using (var p = new Process { StartInfo = psi, EnableRaisingEvents = true })
             {
@@ -2607,19 +2612,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
 
             // Fallback: codex auth login --api-key <key>
-            var psi2 = new ProcessStartInfo
-            {
-                FileName = _cli.Command,
-                WorkingDirectory = cwd!,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            psi2.ArgumentList.Add("auth");
-            psi2.ArgumentList.Add("login");
-            psi2.ArgumentList.Add("--api-key");
-            psi2.ArgumentList.Add(apiKey);
+            var psi2 = await _cli.BuildProcessStartInfoAsync(cwd, new[] { "auth", "login", "--api-key", apiKey }, redirectStdIn: false);
 
             using var p2 = new Process { StartInfo = psi2, EnableRaisingEvents = true };
             p2.OutputDataReceived += (_, ev) => { if (!string.IsNullOrWhiteSpace(ev.Data)) AppendCliLog(ev.Data!); };
@@ -2728,13 +2721,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ShowMcpResultsInLog = _settings.ShowMcpResultsInLog,
             ShowMcpResultsOnlyWhenNoEdits = _settings.ShowMcpResultsOnlyWhenNoEdits,
             Profiles = Services.CodexConfigService.TryGetProfiles(),
-            SelectedProfile = _settings.SelectedProfile
+            SelectedProfile = _settings.SelectedProfile,
+            UseWsl = _cli.UseWsl,
+            CanUseWsl = OperatingSystem.IsWindows()
         };
         dialog.DataContext = vm;
         var result = await dialog.ShowDialog<CliSettings?>(this);
         if (result is null) return;
         _cli.Command = result.Command;
-        AppendCliLog($"System: CLI settings updated: '{_cli.Command}'{(string.IsNullOrWhiteSpace(result.SelectedProfile)?"":" • profile=" + result.SelectedProfile)} (--proto enabled)");
+        var profileSuffix = string.IsNullOrWhiteSpace(result.SelectedProfile) ? string.Empty : " • profile=" + result.SelectedProfile;
+        _settings.UseWsl = OperatingSystem.IsWindows() && result.UseWsl;
+        _cli.UseWsl = OperatingSystem.IsWindows() && _settings.UseWsl;
+        var wslSuffix = _cli.UseWsl ? " • WSL" : string.Empty;
+        AppendCliLog($"System: CLI settings updated: '{_cli.Command}'{profileSuffix}{wslSuffix} (--proto enabled)");
         // persist settings
         _settings.Command = _cli.Command;
         // AdditionalArgs removed (profiles/config.toml driven)
