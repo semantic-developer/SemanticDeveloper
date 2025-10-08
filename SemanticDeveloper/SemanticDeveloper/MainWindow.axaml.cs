@@ -3370,7 +3370,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             : Directory.GetCurrentDirectory();
         try
         {
-            var psi = await _cli.BuildProcessStartInfoAsync(cwd, new[] { "login", "--api-key", apiKey }, redirectStdIn: false);
+            var psi = await _cli.BuildProcessStartInfoAsync(cwd, new[] { "login", "--with-api-key" }, redirectStdIn: true);
 
             using (var p = new Process { StartInfo = psi, EnableRaisingEvents = true })
             {
@@ -3379,12 +3379,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 if (!p.Start()) return -1;
                 p.BeginOutputReadLine();
                 p.BeginErrorReadLine();
+                try
+                {
+                    p.StandardInput.NewLine = "\n";
+                    await p.StandardInput.WriteLineAsync(apiKey);
+                    await p.StandardInput.FlushAsync();
+                    p.StandardInput.Close();
+                }
+                catch { }
                 await p.WaitForExitAsync();
                 if (p.ExitCode == 0) return 0;
             }
 
-            // Fallback: codex auth login --api-key <key>
-            var psi2 = await _cli.BuildProcessStartInfoAsync(cwd, new[] { "auth", "login", "--api-key", apiKey }, redirectStdIn: false);
+            // Fallback: codex auth login --with-api-key
+            var psi2 = await _cli.BuildProcessStartInfoAsync(cwd, new[] { "auth", "login", "--with-api-key" }, redirectStdIn: true);
 
             using var p2 = new Process { StartInfo = psi2, EnableRaisingEvents = true };
             p2.OutputDataReceived += (_, ev) => { if (!string.IsNullOrWhiteSpace(ev.Data)) AppendCliLog(ev.Data!); };
@@ -3392,6 +3400,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (!p2.Start()) return -1;
             p2.BeginOutputReadLine();
             p2.BeginErrorReadLine();
+            try
+            {
+                p2.StandardInput.NewLine = "\n";
+                await p2.StandardInput.WriteLineAsync(apiKey);
+                await p2.StandardInput.FlushAsync();
+                p2.StandardInput.Close();
+            }
+            catch { }
             await p2.WaitForExitAsync();
             return p2.ExitCode;
         }

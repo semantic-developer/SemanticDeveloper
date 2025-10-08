@@ -30,7 +30,7 @@
                 <TextBox Text="{Binding ApiKey, Mode=TwoWay}"
                          PasswordChar="•"
                          Watermark="Enter API key"
-                         ToolTip.Tip="When enabled, the app runs 'codex login --api-key &lt;key&gt;' before sessions"
+                         ToolTip.Tip="When enabled, the app pipes your key to 'codex login --with-api-key' before sessions"
                          MaxWidth="550"/>
                 <TextBlock Margin="0,6,0,0" Foreground="#888" FontSize="12" Text="Stored in settings.json. When enabled, the app authenticates with your key and does not rely on existing CLI login." MaxWidth="550" TextWrapping="Wrap"/>
             </StackPanel>
