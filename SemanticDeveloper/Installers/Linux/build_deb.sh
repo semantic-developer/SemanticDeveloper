@@ -8,7 +8,7 @@ APP_PROJ="$ROOT/SemanticDeveloper/SemanticDeveloper.csproj"
 PUBLISH_DIR="$SCRIPT_DIR/out/publish"
 PKG_ROOT="$SCRIPT_DIR/pkgroot"
 DIST_DIR="$SCRIPT_DIR/dist"
-VERSION="1.0.2"
+VERSION="1.0.3"
 ARCH="amd64"
 if [[ "$RID" == "linux-arm64" ]]; then ARCH="arm64"; fi
 
