@@ -40,7 +40,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI app se
    - Verbose logging (show suppressed output)
    - Enable MCP support (loads MCP servers from your JSON config and passes them directly to Codex)
      - Config path: `~/.config/SemanticDeveloper/mcp_servers.json` (Linux/macOS) or `%AppData%/SemanticDeveloper/mcp_servers.json` (Windows)
- - Use API Key for Codex CLI (runs `codex login --api-key <key>` before sessions; does not rely on existing CLI auth)
+- Use API Key for Codex CLI (pipes the key to `codex login --with-api-key` before sessions; does not rely on existing CLI auth)
   - Allow network access for tools (sets sandbox_policy.network_access=true on turns so MCP tools can reach the network)
   - Without API key enabled, the app proactively authenticates with `codex auth login` (falling back to `codex login`) before sessions so your chat/GPT token is used.
 
@@ -213,7 +213,7 @@ Selection behavior:
 - Authentication:
   - If you are not using an API key and the Codex CLI is not logged in (no `~/.codex/auth.json`), the app-server stream returns 401. The app detects this and prompts to run `codex auth login` for you. Follow the browser flow; on success the app restarts the session automatically.
   - If your CLI version doesn’t support `auth login`, the app falls back to `codex login`.
-  - When “Use API Key” is enabled in CLI Settings, the app attempts a non‑interactive `codex login --api-key <key>` before sessions and on 401. If login succeeds, it restarts the session automatically.
+  - When “Use API Key” is enabled in CLI Settings, the app pipes your key into `codex login --with-api-key` before sessions and on 401. If login succeeds, it restarts the session automatically.
 
 ## Run App
 

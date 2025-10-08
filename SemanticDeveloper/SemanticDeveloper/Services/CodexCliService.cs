@@ -27,13 +27,13 @@ public class CodexCliService
         if (IsRunning)
             throw new InvalidOperationException("CLI already running.");
 
-        // Force proto subcommand per environment ("codex proto")
+        // Force app-server subcommand per environment ("codex app-server")
         var tokens = BuildArgumentTokens(AdditionalArgs);
         var effectiveWorkspace = string.IsNullOrWhiteSpace(workspacePath) ? Directory.GetCurrentDirectory() : workspacePath;
         var psi = await BuildProcessStartInfoAsync(effectiveWorkspace, tokens, redirectStdIn: true);
 
-        // Do not inject API key via environment. Authentication is handled via an explicit
-        // 'codex login --api-key' flow before starting the proto session.
+        // Do not inject API key via environment. Authentication is handled via the explicit
+        // 'codex login --with-api-key' flow before starting the app-server session.
 
         // Emit the exact command being launched to the debug console (not UI)
         try
