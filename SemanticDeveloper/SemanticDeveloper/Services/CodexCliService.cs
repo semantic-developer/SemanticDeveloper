@@ -13,7 +13,6 @@ public class CodexCliService
     private Process? _process;
 
     public string Command { get; set; } = "codex"; // Assumes codex CLI is on PATH
-    public bool UseProto => true;                   // Always use --proto for this app
     public string AdditionalArgs { get; set; } = string.Empty; // Extra CLI args if needed
     public bool UseWsl { get; set; } = false;        // Windows: run via wsl.exe when true
     public bool IsRunning => _process is { HasExited: false };
@@ -23,18 +22,13 @@ public class CodexCliService
     public event EventHandler<string>? OutputReceived;
     public event EventHandler? Exited;
 
-    private enum ProtoMode { Flag, Subcommand, None }
-    private ProtoMode? _detectedMode;
-
     public async Task StartAsync(string workspacePath, CancellationToken cancellationToken)
     {
         if (IsRunning)
             throw new InvalidOperationException("CLI already running.");
 
         // Force proto subcommand per environment ("codex proto")
-        var mode = ProtoMode.Subcommand;
-
-        var tokens = BuildArgumentTokens(mode, AdditionalArgs);
+        var tokens = BuildArgumentTokens(AdditionalArgs);
         var effectiveWorkspace = string.IsNullOrWhiteSpace(workspacePath) ? Directory.GetCurrentDirectory() : workspacePath;
         var psi = await BuildProcessStartInfoAsync(effectiveWorkspace, tokens, redirectStdIn: true);
 
@@ -117,73 +111,6 @@ public class CodexCliService
         if (_process is not { HasExited: false } p)
             throw new InvalidOperationException("CLI is not running.");
         return p.StandardInput.WriteLineAsync(data);
-    }
-
-    private async Task<ProtoMode> DetectProtoModeAsync(string workingDir)
-    {
-        if (_detectedMode is { } cached)
-            return cached;
-
-        try
-        {
-            var (codeFlag, _, _) = await RunArgsAsync(new[] { "--proto", "--help" }, workingDir);
-            if (codeFlag == 0)
-            {
-                _detectedMode = ProtoMode.Flag;
-                return _detectedMode.Value;
-            }
-
-            var (codeSub, _, _) = await RunArgsAsync(new[] { "proto", "--help" }, workingDir);
-            if (codeSub == 0)
-            {
-                _detectedMode = ProtoMode.Subcommand;
-                return _detectedMode.Value;
-            }
-
-            // Fallback: attempt to detect from general help text
-            var help = await RunHelpTextAsync(workingDir);
-            if (help.IndexOf("--proto", StringComparison.OrdinalIgnoreCase) >= 0)
-                _detectedMode = ProtoMode.Flag;
-            else if (help.IndexOf(" proto\n", StringComparison.Ordinal) >= 0 || help.IndexOf("\n  proto ", StringComparison.Ordinal) >= 0 || help.Contains("SUBCOMMANDS") && help.IndexOf("proto", StringComparison.OrdinalIgnoreCase) >= 0)
-                _detectedMode = ProtoMode.Subcommand;
-            else
-                _detectedMode = ProtoMode.None;
-        }
-        catch
-        {
-            _detectedMode = ProtoMode.None;
-        }
-
-        return _detectedMode.Value;
-    }
-
-    private async Task<string> RunHelpTextAsync(string workingDir)
-    {
-        try
-        {
-            var psi = await BuildProcessStartInfoAsync(workingDir, new[] { "--help" }, redirectStdIn: false);
-            using var p = Process.Start(psi);
-            if (p is null) return string.Empty;
-            var stdout = await p.StandardOutput.ReadToEndAsync();
-            var stderr = await p.StandardError.ReadToEndAsync();
-            await p.WaitForExitAsync();
-            return string.IsNullOrWhiteSpace(stdout) ? stderr : stdout;
-        }
-        catch (Exception ex)
-        {
-            return ex.Message;
-        }
-    }
-
-    private async Task<(int Exit, string Stdout, string Stderr)> RunArgsAsync(IEnumerable<string> args, string workingDir)
-    {
-        var psi = await BuildProcessStartInfoAsync(workingDir, args, redirectStdIn: false);
-        using var p = new Process { StartInfo = psi };
-        p.Start();
-        var stdout = await p.StandardOutput.ReadToEndAsync();
-        var stderr = await p.StandardError.ReadToEndAsync();
-        await p.WaitForExitAsync();
-        return (p.ExitCode, stdout, stderr);
     }
 
     internal async Task<ProcessStartInfo> BuildProcessStartInfoAsync(string workingDir, IEnumerable<string> commandArgs, bool redirectStdIn, bool redirectStdOut = true, bool redirectStdErr = true)
@@ -291,14 +218,9 @@ public class CodexCliService
         return token;
     }
 
-    private static List<string> BuildArgumentTokens(ProtoMode mode, string? additional)
+    private static List<string> BuildArgumentTokens(string? additional)
     {
-        var tokens = new List<string>();
-        switch (mode)
-        {
-            case ProtoMode.Flag: tokens.Add("--proto"); break;
-            case ProtoMode.Subcommand: tokens.Add("proto"); break;
-        }
+        var tokens = new List<string> { "app-server" };
         if (!string.IsNullOrWhiteSpace(additional))
         {
             tokens.AddRange(SplitArgsRespectingQuotes(additional!));
