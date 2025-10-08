@@ -29,19 +29,26 @@ using SemanticDeveloper.Models;
 using SemanticDeveloper.Services;
 using SemanticDeveloper.Views;
 using AvaloniaEdit; 
-using System.Collections.Generic;
+using System.Collections.Concurrent;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace SemanticDeveloper;
 
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
     private readonly CodexCliService _cli = new();
-    private ProtoHelper.SubmissionShape _submissionShape = ProtoHelper.SubmissionShape.NestedInternallyTagged;
-    private ProtoHelper.ContentStyle _contentStyle = ProtoHelper.ContentStyle.Flattened;
-    private string _defaultMsgType = "user_turn";
     private string? _currentModel;
     // Auto-approval UI removed; approvals require manual handling
     private AppSettings _settings = new();
+
+    private long _nextRequestId;
+    private readonly ConcurrentDictionary<long, TaskCompletionSource<JToken>> _pendingRequests = new();
+    private readonly List<McpServerDefinition> _configuredMcpServers = new();
+    private JObject? _pendingConfigOverrides;
+    private bool _appServerInitialized;
+    private string? _conversationId;
+    private string? _conversationSubscriptionId;
 
     private string? _currentWorkspacePath;
     private string _cliLog = string.Empty;
@@ -176,6 +183,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             IsCliRunning = false;
             SessionStatus = "stopped";
+            _appServerInitialized = false;
+            _conversationId = null;
+            _conversationSubscriptionId = null;
+            _currentModel = null;
+            foreach (var pending in _pendingRequests.Values)
+            {
+                pending.TrySetException(new InvalidOperationException("Codex CLI exited."));
+            }
+            _pendingRequests.Clear();
         };
 
         // Lazy-load file tree nodes when expanded
@@ -196,7 +212,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             Services.McpConfigService.EnsureConfigExists();
             if (!File.Exists(path)) return;
             var text = File.ReadAllText(path);
-            var json = Newtonsoft.Json.Linq.JObject.Parse(text);
+            var json = JObject.Parse(text);
             var existing = McpServers.ToDictionary(s => s.Name, s => s, StringComparer.OrdinalIgnoreCase);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -209,13 +225,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     McpServers.Add(new McpServerEntry { Name = name, Selected = true });
             }
 
-            if (json["mcpServers"] is Newtonsoft.Json.Linq.JObject map)
+            if (json["mcpServers"] is JObject map)
             {
                 foreach (var p in map.Properties()) AddOrUpdate(p.Name);
             }
-            else if (json["servers"] is Newtonsoft.Json.Linq.JArray arr)
+            else if (json["servers"] is JArray arr)
             {
-                foreach (var s in arr.OfType<Newtonsoft.Json.Linq.JObject>()) AddOrUpdate(s["name"]?.ToString() ?? string.Empty);
+                foreach (var s in arr.OfType<JObject>()) AddOrUpdate(s["name"]?.ToString() ?? string.Empty);
             }
 
             // Remove entries no longer present
@@ -500,6 +516,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    private void AppendCliLogVerbose(string text)
+    {
+        if (!_verboseLogging) return;
+        AppendCliLog(text);
+    }
+
     private void AutoScrollLogIfNeeded()
     {
         if (!_logAutoScroll) return;
@@ -545,66 +567,68 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void OnCliOutput(object? sender, string line)
     {
-        // Hide noisy agent logs (unless verbose)
-        if (!_verboseLogging && LooksLikeAgentLog(line)) return;
-        // Hide verbose function call apply_patch payloads (unless verbose)
-        if (!_verboseLogging && IsFunctionCallApplyPatch(line)) { SetStatusSafe("thinking…"); AppendCliLog("System: Applying patch…"); return; }
+        if (string.IsNullOrEmpty(line))
+            return;
 
-        // Prefer pretty rendering for protocol JSON events; fallback to raw text
-        var handled = TryRenderProtocolEvent(line);
-        if (!handled)
-        {
-            AppendCliLog(line);
-        }
-        // Auto-approval disabled; do not auto-respond to approval requests
-        var l = line.ToLowerInvariant();
-        if (l.Contains("expected internally tagged enum op") && _submissionShape == ProtoHelper.SubmissionShape.TopLevelInternallyTagged)
-        {
-            _submissionShape = ProtoHelper.SubmissionShape.NestedInternallyTagged;
-            AppendCliLog("System: Switched submission shape to nested 'op' to satisfy proto parser.");
-        }
-        if (l.Contains("unknown field `type`") || l.Contains("missing field `type`"))
-        {
-            _contentStyle = ProtoHelper.ContentStyle.Flattened;
-            _defaultMsgType = "user_input";
-            AppendCliLog("System: Setting style=flattened and type='user_input'.");
-        }
-        if (l.Contains("unknown field `msg`") || l.Contains("missing field `msg`"))
-        {
-            _contentStyle = ProtoHelper.ContentStyle.Flattened;
-            AppendCliLog("System: Switching content style to flattened (no 'msg' field).");
-        }
-        if (l.Contains("missing field `items`"))
-        {
-            _defaultMsgType = "user_turn";
-            AppendCliLog("System: Setting message type to 'user_turn' with items.");
-        }
+        if (TryHandleAppServerMessage(line))
+            return;
 
-        // Try capture model from session_configured messages
-        TryUpdateModelFromJson(line);
+        AppendCliLog(line);
     }
 
-    private bool LooksLikeAgentLog(string line)
+    private bool TryHandleAppServerMessage(string line)
     {
-        if (string.IsNullOrEmpty(line)) return false;
-        if (char.IsDigit(line.FirstOrDefault()) && line.Contains(" codex_core::")) return true;
+        JObject root;
+        try { root = JObject.Parse(line); }
+        catch { return false; }
+
+        if (root.TryGetValue("method", out var methodToken))
+        {
+            var method = methodToken?.ToString() ?? string.Empty;
+            if (root.ContainsKey("id"))
+            {
+                _ = HandleServerRequestAsync(root);
+            }
+            else
+            {
+                HandleServerNotification(method, root["params"] as JObject);
+            }
+            return true;
+        }
+
+        if (root.ContainsKey("id"))
+        {
+            HandleServerResponse(root);
+            return true;
+        }
+
+        if (root["error"] is JObject errorObj)
+        {
+            var message = errorObj["message"]?.ToString() ?? "Unknown Codex error";
+            AppendCliLog("System: ERROR: " + message);
+            SetStatusSafe("error");
+            return true;
+        }
+
         return false;
     }
 
-    private bool IsFunctionCallApplyPatch(string line)
-        => line.Contains("FunctionCall: shell(") && line.Contains("\"apply_patch\"");
-
-    private bool TryRenderProtocolEvent(string line)
+    private bool TryRenderProtocolEvent(JObject root)
     {
-        var json = line.Trim();
-        if (!json.StartsWith("{")) return false;
-        Newtonsoft.Json.Linq.JObject? root;
-        try { root = (Newtonsoft.Json.Linq.JObject?)Newtonsoft.Json.Linq.JToken.Parse(json); }
-        catch { return false; }
-        if (root is null) return false;
+        JObject? msg = root["msg"] as JObject;
+        if (msg is null)
+        {
+            if (root.TryGetValue("type", out var typeCandidate) && typeCandidate?.Type == JTokenType.String)
+            {
+                msg = root;
+            }
+            else
+            {
+                return false;
+            }
+        }
 
-        var msg = root["msg"] as Newtonsoft.Json.Linq.JObject;
-        var type = msg? ["type"]?.ToString();
+        var type = msg["type"]?.ToString();
         if (string.IsNullOrWhiteSpace(type)) return false;
 
         var lower = type.ToLowerInvariant();
@@ -679,7 +703,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 {
                     try
                     {
-                        var inv = msg? ["invocation"] as Newtonsoft.Json.Linq.JObject;
+                        var inv = msg? ["invocation"] as JObject;
                         var server = inv? ["server"]?.ToString();
                         var tool = inv? ["tool"]?.ToString();
                         if (!string.IsNullOrWhiteSpace(server) && !string.IsNullOrWhiteSpace(tool))
@@ -692,11 +716,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 {
                     try
                     {
-                        var inv = msg? ["invocation"] as Newtonsoft.Json.Linq.JObject;
+                        var inv = msg? ["invocation"] as JObject;
                         var server = inv? ["server"]?.ToString();
                         var tool = inv? ["tool"]?.ToString();
                         // Handle success/error across variants (is_error/isError, Err, error, success=false)
-                        var res = msg? ["result"] as Newtonsoft.Json.Linq.JObject;
+                        var res = msg? ["result"] as JObject;
                         bool isError = false;
                         string? errorMsg = null;
                         int contentCount = -1;
@@ -712,21 +736,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                             {
                                 isError = true;
                                 var e = res["Err"];
-                                errorMsg = e?.Type == Newtonsoft.Json.Linq.JTokenType.String ? e?.ToString() : e?.ToString(Newtonsoft.Json.Formatting.None);
+                                errorMsg = e?.Type == JTokenType.String ? e?.ToString() : e?.ToString(Newtonsoft.Json.Formatting.None);
                             }
                             // Common error keys
                             if (!isError && res["error"] != null)
                             {
                                 isError = true;
                                 var e = res["error"];
-                                errorMsg = e?.Type == Newtonsoft.Json.Linq.JTokenType.String ? e?.ToString() : e?.ToString(Newtonsoft.Json.Formatting.None);
+                                errorMsg = e?.Type == JTokenType.String ? e?.ToString() : e?.ToString(Newtonsoft.Json.Formatting.None);
                             }
                             // success flag
                             if (!isError && res["success"] != null && bool.TryParse(res["success"]?.ToString(), out var succ))
                                 isError = !succ;
                             try
                             {
-                                if (res["content"] is Newtonsoft.Json.Linq.JArray arr)
+                                if (res["content"] is JArray arr)
                                     contentCount = arr.Count;
                             }
                             catch { }
@@ -737,7 +761,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                                 {
                                     hasStructured = true;
                                     var resultsNode = sc["results"];
-                                    if (resultsNode is Newtonsoft.Json.Linq.JArray arr2)
+                                    if (resultsNode is JArray arr2)
                                         structuredResults = arr2.Count;
                                 }
                             }
@@ -763,20 +787,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                             if (!isError && _showMcpResultsInLog && (!_showMcpResultsOnlyWhenNoEdits || (!_turnSawExec && !_turnSawPatch)))
                             {
                                 // Prefer structured_content.results list with title/url
-                                var resObj = msg? ["result"] as Newtonsoft.Json.Linq.JObject;
+                                var resObj = msg? ["result"] as JObject;
                                 var sc = (resObj? ["structured_content"]) ?? (resObj? ["structuredContent"]);
-                                var results = sc? ["results"] as Newtonsoft.Json.Linq.JArray;
+                                var results = sc? ["results"] as JArray;
                                 if (results != null && results.Count > 0)
                                 {
                                     // Local helpers to normalize field names across servers
-                                    string? GetTitle(Newtonsoft.Json.Linq.JObject it)
+                                    string? GetTitle(JObject it)
                                     {
                                         return it["title"]?.ToString()
                                                ?? it["Title"]?.ToString()
                                                ?? it["item1"]?.ToString()
                                                ?? it["Item1"]?.ToString();
                                     }
-                                    string? GetUrl(Newtonsoft.Json.Linq.JObject it)
+                                    string? GetUrl(JObject it)
                                     {
                                         return it["url"]?.ToString()
                                                ?? it["Url"]?.ToString()
@@ -790,7 +814,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                                     AppendCliLog($"Results ({server}.{tool}):");
                                     for (int i = 0; i < max; i++)
                                     {
-                                        if (results[i] is Newtonsoft.Json.Linq.JObject item)
+                                        if (results[i] is JObject item)
                                         {
                                             var title = GetTitle(item);
                                             var url = GetUrl(item);
@@ -808,12 +832,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                                     // Fallback: show first text content block if present
                                     var contentTok = resObj? ["content"];
                                     string? text = null;
-                                    if (contentTok is Newtonsoft.Json.Linq.JArray contentArr)
+                                    if (contentTok is JArray contentArr)
                                     {
-                                        var textBlock = contentArr.FirstOrDefault(t => (t?["type"]?.ToString() ?? string.Empty).Equals("text", StringComparison.OrdinalIgnoreCase)) as Newtonsoft.Json.Linq.JObject;
+                                        var textBlock = contentArr.FirstOrDefault(t => (t?["type"]?.ToString() ?? string.Empty).Equals("text", StringComparison.OrdinalIgnoreCase)) as JObject;
                                         text = textBlock? ["text"]?.ToString();
                                     }
-                                    else if (contentTok is Newtonsoft.Json.Linq.JValue v && v.Type == Newtonsoft.Json.Linq.JTokenType.String)
+                                    else if (contentTok is JValue v && v.Type == JTokenType.String)
                                     {
                                         text = v.ToString();
                                     }
@@ -856,8 +880,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 {
                     try
                     {
-                        var tools = msg? ["tools"] as Newtonsoft.Json.Linq.JObject;
-                        var toolArray = msg? ["tools"] as Newtonsoft.Json.Linq.JArray;
+                        var tools = msg? ["tools"] as JObject;
+                        var toolArray = msg? ["tools"] as JArray;
                         var names = new List<string>();
                         if (tools != null)
                         {
@@ -972,7 +996,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 }
             case "exec_command_begin":
                 {
-                    var cmdArr = msg? ["command"] as Newtonsoft.Json.Linq.JArray;
+                    var cmdArr = msg? ["command"] as JArray;
                     var callId = msg? ["call_id"]?.ToString();
                     var tokens = cmdArr is null ? new System.Collections.Generic.List<string>() : cmdArr.Select(t => t?.ToString() ?? string.Empty).ToList();
                     _turnSawExec = true;
@@ -1042,38 +1066,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return true;
             case "exec_approval_request":
             case "apply_patch_approval_request":
-                {
-                    try
-                    {
-                        var eventId = root["id"]?.ToString();
-                        if (!string.IsNullOrWhiteSpace(eventId))
-                        {
-                            var op = lower.StartsWith("exec") ? "exec_approval" : "patch_approval";
-                            var approvalJson = Services.ProtoHelper.BuildApproval(op, eventId!, "approved", _submissionShape);
-                            _ = _cli.SendAsync(approvalJson);
-                            var summary = string.Empty;
-                            if (lower.StartsWith("exec"))
-                            {
-                                var cmdArr = msg? ["command"] as Newtonsoft.Json.Linq.JArray;
-                                if (cmdArr != null && cmdArr.Count > 0)
-                                {
-                                    var tokens = cmdArr.Select(t => t?.ToString() ?? string.Empty).ToList();
-                                    if (tokens.Any(t => t.StartsWith("*** Begin Patch")) || tokens.Contains("apply_patch"))
-                                        summary = "apply_patch";
-                                    else
-                                        summary = string.Join(" ", tokens.Take(5));
-                                }
-                            }
-                            if (!string.IsNullOrEmpty(summary))
-                            {
-                                if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
-                                AppendCliLog($"System: Auto-approved {op}: {summary}");
-                            }
-                        }
-                    }
-                    catch { }
-                    return true;
-                }
+                return true;
             case "task_started":
                 if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
                 AppendCliLog("System: Task started");
@@ -1122,33 +1115,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             Dispatcher.UIThread.Post(() => SessionStatus = status);
     }
 
-    private void TryUpdateModelFromJson(string line)
+    private void UpdateTokenStats(JObject msg)
     {
-        try
-        {
-            var json = line.Trim();
-            if (!json.StartsWith("{")) return;
-            var token = Newtonsoft.Json.Linq.JToken.Parse(json);
-            if (token is not Newtonsoft.Json.Linq.JObject obj) return;
-            var msg = obj["msg"] as Newtonsoft.Json.Linq.JObject;
-            if (msg? ["type"]?.ToString() == "session_configured")
-            {
-                var model = msg["model"]?.ToString();
-                if (!string.IsNullOrWhiteSpace(model))
-                {
-                    _currentModel = model;
-                    AppendCliLog($"System: Detected model: {_currentModel}");
-                }
-            }
-        }
-        catch { }
-    }
-
-    private void UpdateTokenStats(Newtonsoft.Json.Linq.JObject msg)
-    {
-        var info = msg["info"] as Newtonsoft.Json.Linq.JObject;
+        var info = msg["info"] as JObject;
         if (info is null) return;
-        var total = info["total_token_usage"] as Newtonsoft.Json.Linq.JObject;
+        var total = info["total_token_usage"] as JObject;
         if (total is null) return;
 
         long input = total.Value<long?>("input_tokens") ?? 0L;
@@ -1156,7 +1127,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         long output = total.Value<long?>("output_tokens") ?? 0L;
         long blendedTotal = Math.Max(0, (input - cached)) + output;
 
-        var modelCw = (info["model_context_window"]?.Type == Newtonsoft.Json.Linq.JTokenType.Integer)
+        var modelCw = (info["model_context_window"]?.Type == JTokenType.Integer)
             ? info.Value<long?>("model_context_window")
             : null;
 
@@ -2149,7 +2120,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SessionStatus = "starting…";
         try
         {
-            // Build profile flag if selected (use config override to avoid unsupported --profile on proto)
             var prevArgs = _cli.AdditionalArgs;
             var effectiveArgs = new System.Text.StringBuilder();
             if (!string.IsNullOrWhiteSpace(_settings.SelectedProfile))
@@ -2157,25 +2127,48 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 effectiveArgs.Append("-c profile=").Append(_settings.SelectedProfile).Append(' ');
                 AppendCliLog($"System: Using profile '{_settings.SelectedProfile}'");
             }
-            if (IsMcpEnabled)
+
+        _pendingConfigOverrides = null;
+        if (IsMcpEnabled)
+        {
+            try
             {
-                try
+                Services.McpConfigService.EnsureConfigExists();
+                var overrides = BuildMcpConfigOverrides(out var serverNames);
+                if (overrides is not null)
                 {
-                    Services.McpConfigService.EnsureConfigExists();
-                    var flags = BuildMcpServersFlags();
-                    if (!string.IsNullOrWhiteSpace(flags))
+                    _pendingConfigOverrides = overrides;
+                    if (_verboseLogging)
                     {
-                        effectiveArgs.Append(flags).Append(' ');
-                        AppendCliLog("System: Injected MCP servers from config.");
+                        if (serverNames.Count == 1)
+                        {
+                            AppendCliLog($"System: Injected MCP server '{serverNames[0]}'.");
+                        }
+                        else if (serverNames.Count > 1)
+                        {
+                            AppendCliLog($"System: Injected MCP servers: {string.Join(", ", serverNames)}.");
+                        }
+                        else
+                        {
+                            AppendCliLog("System: Injected MCP servers from config.");
+                        }
                     }
-                    else AppendCliLog("System: No MCP servers configured; skipping.");
                 }
-                catch (Exception ex)
+                else if (serverNames.Count == 0)
                 {
-                    AppendCliLog("System: Failed to prepare MCP flags: " + ex.Message);
+                    AppendCliLog("System: No MCP servers configured; skipping.");
+                }
+                else if (_verboseLogging)
+                {
+                    AppendCliLog("System: Injected MCP servers from config.");
                 }
             }
-            // Apply args composed from profile + MCP flags only (AdditionalArgs deprecated)
+            catch (Exception ex)
+            {
+                AppendCliLog("System: Failed to prepare MCP config: " + ex.Message);
+                }
+            }
+            // Apply args composed from profile overrides only (AdditionalArgs deprecated)
             var composed = effectiveArgs.ToString().Trim();
             _cli.AdditionalArgs = composed;
 
@@ -2249,17 +2242,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             await _cli.StartAsync(CurrentWorkspacePath, CancellationToken.None);
             _cli.AdditionalArgs = prevArgs; // restore original
             IsCliRunning = _cli.IsRunning;
-            SessionStatus = IsCliRunning ? "idle" : "stopped";
-            // Request MCP tools list once session is up (if enabled)
-            if (IsMcpEnabled && IsCliRunning)
+            if (!IsCliRunning)
             {
-                try
-                {
-                    var msg = Services.ProtoHelper.BuildListMcpTools();
-                    await _cli.SendAsync(msg);
-                    AppendCliLog("System: Requested MCP tools…");
-                }
-                catch { }
+                SessionStatus = "stopped";
+                return;
+            }
+
+            _pendingRequests.Clear();
+            _nextRequestId = 0;
+            _appServerInitialized = false;
+            _conversationId = null;
+            _conversationSubscriptionId = null;
+
+            try
+            {
+                await InitializeAppServerAsync();
+                SessionStatus = "idle";
+            }
+            catch (Exception initEx)
+            {
+                AppendCliLog("System: Failed to initialize Codex: " + initEx.Message);
+                SessionStatus = "error";
+                _cli.Stop();
+                IsCliRunning = false;
             }
         }
         catch (Exception ex)
@@ -2269,13 +2274,340 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    private async Task InitializeAppServerAsync()
+    {
+        if (!_cli.IsRunning)
+            throw new InvalidOperationException("CLI is not running.");
+
+        var version = typeof(MainWindow).Assembly?.GetName().Version?.ToString() ?? "dev";
+        var initParams = new JObject
+        {
+            ["clientInfo"] = new JObject
+            {
+                ["name"] = "semantic-developer",
+                ["title"] = "Semantic Developer",
+                ["version"] = version
+            }
+        };
+
+        await SendRequestAsync("initialize", initParams);
+        _appServerInitialized = true;
+        AppendCliLog("System: Codex app server ready.");
+
+        await StartConversationAsync();
+    }
+
+    private async Task StartConversationAsync()
+    {
+        if (!_appServerInitialized)
+            throw new InvalidOperationException("Codex app server not initialized.");
+
+        var conversationParams = new JObject
+        {
+            ["approvalPolicy"] = "on-request",
+            ["sandbox"] = "workspace-write"
+        };
+
+        if (_pendingConfigOverrides is { })
+            conversationParams["config"] = (JObject)_pendingConfigOverrides.DeepClone();
+
+        if (!string.IsNullOrWhiteSpace(_settings.SelectedProfile))
+            conversationParams["profile"] = _settings.SelectedProfile;
+
+        if (!string.IsNullOrWhiteSpace(CurrentWorkspacePath))
+            conversationParams["cwd"] = CurrentWorkspacePath;
+
+        var response = await SendRequestAsync("newConversation", conversationParams);
+        if (response is JObject obj)
+        {
+            _conversationId = obj["conversationId"]?.ToString() ?? _conversationId;
+            var model = obj["model"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                _currentModel = model;
+                AppendCliLog($"System: Model • {model}");
+            }
+        }
+
+        await SubscribeToConversationAsync();
+        _ = RefreshMcpToolInventoryAsync();
+    }
+
+    private async Task SubscribeToConversationAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_conversationId))
+            return;
+
+        var response = await SendRequestAsync(
+            "addConversationListener",
+            new JObject { ["conversationId"] = _conversationId }
+        );
+
+        if (response is JObject obj)
+        {
+            _conversationSubscriptionId = obj["subscriptionId"]?.ToString();
+        }
+    }
+
+    private void HandleServerResponse(JObject response)
+    {
+        if (!response.TryGetValue("id", out var idToken))
+            return;
+
+        if (!TryGetRequestId(idToken, out var id))
+            return;
+
+        if (!_pendingRequests.TryRemove(id, out var tcs))
+            return;
+
+        if (response["error"] is JObject error)
+        {
+            var message = error["message"]?.ToString() ?? "Unknown Codex error";
+            tcs.TrySetException(new InvalidOperationException(message));
+            if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
+            AppendCliLog("System: ERROR: " + message);
+            if (message.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0)
+                _ = HandleUnauthorizedAsync();
+            SetStatusSafe("error");
+        }
+        else
+        {
+            tcs.TrySetResult(response["result"] ?? JValue.CreateNull());
+        }
+    }
+
+    private void HandleServerNotification(string method, JObject? parameters)
+    {
+        if (string.IsNullOrEmpty(method))
+            return;
+
+        switch (method)
+        {
+            case "authStatusChange":
+                break;
+            case "loginChatGptComplete":
+                if (parameters? ["success"]?.Value<bool>() == true)
+                    AppendCliLog("System: ChatGPT login completed.");
+                else if (parameters != null)
+                    AppendCliLog("System: ChatGPT login failed: " + (parameters["error"]?.ToString() ?? "unknown error"));
+                break;
+            case "sessionConfigured":
+                if (parameters is not null)
+                    HandleSessionConfiguredNotification(parameters);
+                break;
+            default:
+                if (method.StartsWith("codex/event/", StringComparison.Ordinal))
+                {
+                    if (parameters is JObject evt)
+                    {
+                        var handled = TryRenderProtocolEvent(evt);
+                        if (!handled && _verboseLogging)
+                        {
+                            AppendCliLog(evt.ToString(Formatting.None));
+                        }
+                    }
+                }
+                else if (_verboseLogging)
+                {
+                    AppendCliLog($"System: Notification {method}: {parameters?.ToString(Formatting.None) ?? string.Empty}");
+                }
+                break;
+        }
+    }
+
+    private void HandleSessionConfiguredNotification(JObject payload)
+    {
+        try
+        {
+            var sessionId = payload["sessionId"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(sessionId))
+                _conversationId = sessionId;
+
+            var model = payload["model"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                _currentModel = model;
+                AppendCliLog($"System: Session model • {model}");
+            }
+
+            if (payload["initialMessages"] is JArray initial)
+            {
+                foreach (var item in initial.OfType<JObject>())
+                {
+                    _ = TryRenderProtocolEvent(item);
+                }
+            }
+        }
+        catch { }
+    }
+
+    private Task HandleServerRequestAsync(JObject request)
+    {
+        return Task.Run(async () =>
+        {
+            var method = request["method"]?.ToString() ?? string.Empty;
+            var idToken = request["id"];
+            if (idToken is null)
+                return;
+
+            try
+            {
+                switch (method)
+                {
+                    case "execCommandApproval":
+                        LogApprovalSummary("exec", request["params"] as JObject);
+                        await SendServerResponseAsync(idToken, new JObject { ["decision"] = "approved" });
+                        break;
+                    case "applyPatchApproval":
+                        LogApprovalSummary("patch", request["params"] as JObject);
+                        await SendServerResponseAsync(idToken, new JObject { ["decision"] = "approved" });
+                        break;
+                    default:
+                        AppendCliLog($"System: Unhandled request '{method}'");
+                        await SendServerErrorAsync(idToken, -32601, $"Unsupported request '{method}'");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendCliLog("System: Failed to respond to request: " + ex.Message);
+            }
+        });
+    }
+
+    private async Task SendServerResponseAsync(JToken idToken, JObject result)
+    {
+        var response = new JObject
+        {
+            ["id"] = idToken.DeepClone(),
+            ["result"] = result
+        };
+        await _cli.SendAsync(response.ToString(Formatting.None)).ConfigureAwait(false);
+    }
+
+    private async Task SendServerErrorAsync(JToken idToken, int code, string message)
+    {
+        var response = new JObject
+        {
+            ["id"] = idToken.DeepClone(),
+            ["error"] = new JObject
+            {
+                ["code"] = code,
+                ["message"] = message
+            }
+        };
+        await _cli.SendAsync(response.ToString(Formatting.None)).ConfigureAwait(false);
+    }
+
+    private void LogApprovalSummary(string kind, JObject? parameters)
+    {
+        if (parameters is null)
+            return;
+
+        try
+        {
+            string summary = string.Empty;
+            if (kind == "exec")
+            {
+                var cmd = parameters["command"] as JArray;
+                if (cmd != null)
+                {
+                    var tokens = cmd.Select(t => t?.ToString() ?? string.Empty).Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+                    if (tokens.Count > 0)
+                        summary = string.Join(" ", tokens.Take(5));
+                }
+            }
+            else if (kind == "patch")
+            {
+                var files = parameters["file_changes"] as JObject;
+                if (files != null)
+                {
+                    summary = $"{files.Properties().Count()} file(s)";
+                }
+            }
+
+            if (!string.IsNullOrEmpty(summary))
+            {
+                if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
+                AppendCliLog($"System: Auto-approved {kind}: {summary}");
+            }
+        }
+        catch { }
+    }
+
+    private async Task<JToken> SendRequestAsync(string method, JObject? parameters = null, CancellationToken cancellationToken = default)
+    {
+        if (!_cli.IsRunning)
+            throw new InvalidOperationException("CLI is not running.");
+
+        var id = Interlocked.Increment(ref _nextRequestId);
+        var request = new JObject
+        {
+            ["id"] = id,
+            ["method"] = method
+        };
+
+        if (parameters != null && parameters.HasValues)
+            request["params"] = parameters;
+
+        var payload = request.ToString(Formatting.None);
+
+        var tcs = new TaskCompletionSource<JToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingRequests[id] = tcs;
+
+        try
+        {
+            await _cli.SendAsync(payload).ConfigureAwait(false);
+        }
+        catch (Exception sendEx)
+        {
+            _pendingRequests.TryRemove(id, out _);
+            tcs.TrySetException(sendEx);
+        }
+
+        if (cancellationToken.CanBeCanceled)
+        {
+            cancellationToken.Register(() =>
+            {
+                if (_pendingRequests.TryRemove(id, out var source))
+                    source.TrySetCanceled();
+            });
+        }
+
+        return await tcs.Task.ConfigureAwait(false);
+    }
+
+    private static bool TryGetRequestId(JToken token, out long id)
+    {
+        id = 0;
+        try
+        {
+            id = token.Type switch
+            {
+                JTokenType.Integer => token.Value<long>(),
+                JTokenType.String when long.TryParse(token.Value<string>(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) => parsed,
+                _ => id
+            };
+            return id != 0 || token.Type == JTokenType.Integer;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private async Task InterruptCliAsync()
     {
         if (!_cli.IsRunning) return;
         try
         {
-            var interrupt = Services.ProtoHelper.BuildInterrupt();
-            await _cli.SendAsync(interrupt);
+            if (!string.IsNullOrWhiteSpace(_conversationId))
+            {
+                await SendRequestAsync(
+                    "interruptConversation",
+                    new JObject { ["conversationId"] = _conversationId }
+                );
+            }
             SetStatusSafe("idle");
         }
         catch
@@ -2286,106 +2618,515 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private static string EscapeForCli(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
-    private static string BuildJsonArray(IEnumerable<string> items)
+    private JObject? BuildMcpConfigOverrides(out List<string> serverNames)
     {
-        var sb = new System.Text.StringBuilder();
-        sb.Append('[');
-        bool first = true;
-        foreach (var it in items)
-        {
-            if (!first) sb.Append(','); first = false;
-            var v = it.Replace("\\", "\\\\").Replace("\"", "\\\"");
-            sb.Append('"').Append(v).Append('"');
-        }
-        sb.Append(']');
-        return sb.ToString();
-    }
-
-    private string BuildMcpServersFlags()
-    {
+        _configuredMcpServers.Clear();
+        var included = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        serverNames = new List<string>();
         try
         {
             var path = Services.McpConfigService.GetConfigPath();
-            if (!File.Exists(path)) return string.Empty;
-            var json = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(path));
+            if (!File.Exists(path))
+                return null;
 
-            // Support new format: { "mcpServers": { "name": { command, args, cwd?, env?, enabled? }, ... } }
-            // and legacy format: { "servers": [ { name, command, args, cwd?, env?, enabled? }, ... ] }
-            var parts = new List<string>();
-
-            // Selected servers set
+            var root = JObject.Parse(File.ReadAllText(path));
             var selected = new HashSet<string>(McpServers.Where(s => s.Selected).Select(s => s.Name), StringComparer.OrdinalIgnoreCase);
             bool HasSelection() => selected.Count > 0;
 
-            if (json["mcpServers"] is Newtonsoft.Json.Linq.JObject map)
+            var result = new JObject();
+            var mcpServersObj = new JObject();
+            result["mcp_servers"] = mcpServersObj;
+
+            void AddServer(string rawName, JObject definition)
             {
-                foreach (var prop in map.Properties())
+                if (definition is null) return;
+
+                var enabledTok = definition["enabled"];
+                if (enabledTok != null && bool.TryParse(enabledTok.ToString(), out var enabled) && !enabled)
+                    return;
+
+                var name = SanitizeServerName(rawName);
+                if (string.IsNullOrWhiteSpace(name))
+                    return;
+                if (HasSelection() && !selected.Contains(name))
+                    return;
+
+                var commandText = definition["command"]?.ToString();
+                var urlText = definition["url"]?.ToString();
+                if (string.IsNullOrWhiteSpace(commandText) && string.IsNullOrWhiteSpace(urlText))
+                    return;
+
+                var serverObj = new JObject();
+                var def = new McpServerDefinition { Name = name };
+
+                if (!string.IsNullOrWhiteSpace(commandText))
                 {
-                    var name = prop.Name.Trim();
-                    if (prop.Value is not Newtonsoft.Json.Linq.JObject s) continue;
-                    if (!HasSelection() || selected.Contains(name))
-                        AppendServerFlags(parts, name, s);
+                    commandText = commandText.Trim();
+                    serverObj["command"] = commandText;
+                    def.Command = commandText;
+
+                    if (definition["args"] is JArray argsArray && argsArray.Count > 0)
+                    {
+                        var args = argsArray
+                            .Select(a => a?.ToString() ?? string.Empty)
+                            .Where(a => !string.IsNullOrWhiteSpace(a))
+                            .ToList();
+                        if (args.Count > 0)
+                        {
+                            serverObj["args"] = new JArray(args);
+                            def.Args.AddRange(args);
+                        }
+                    }
+                    else if (definition["args"] is JValue argValue && argValue.Type == JTokenType.String)
+                    {
+                        var argText = argValue.ToString();
+                        if (!string.IsNullOrWhiteSpace(argText))
+                        {
+                            serverObj["args"] = new JArray(argText);
+                            def.Args.Add(argText);
+                        }
+                    }
+
+                    var cwdToken = definition["cwd"];
+                    if (cwdToken != null && !string.IsNullOrWhiteSpace(cwdToken.ToString()))
+                    {
+                        var cwd = cwdToken.ToString();
+                        serverObj["cwd"] = cwd;
+                        def.Cwd = cwd;
+                    }
+                }
+                else if (!string.IsNullOrWhiteSpace(urlText))
+                {
+                    urlText = urlText.Trim();
+                    serverObj["url"] = urlText;
+                    def.Url = urlText;
+                    var bearerToken = definition["bearer_token"]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(bearerToken))
+                    {
+                        serverObj["bearer_token"] = bearerToken;
+                        def.BearerToken = bearerToken;
+                    }
+                }
+
+                var startupSecToken = definition["startup_timeout_sec"];
+                if (startupSecToken != null && double.TryParse(startupSecToken.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var startupSec))
+                {
+                    serverObj["startup_timeout_sec"] = startupSec;
+                    def.StartupTimeoutSec = startupSec;
+                }
+
+                var startupMsToken = definition["startup_timeout_ms"];
+                if (startupMsToken != null && long.TryParse(startupMsToken.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var startupMs))
+                    serverObj["startup_timeout_ms"] = startupMs;
+
+                var toolTimeoutToken = definition["tool_timeout_sec"];
+                if (toolTimeoutToken != null && double.TryParse(toolTimeoutToken.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var toolTimeout))
+                {
+                    serverObj["tool_timeout_sec"] = toolTimeout;
+                    def.ToolTimeoutSec = toolTimeout;
+                }
+
+                if (definition["env"] is JObject envObj && envObj.Properties().Any())
+                {
+                    var env = new JObject();
+                    foreach (var prop in envObj.Properties())
+                    {
+                        var value = prop.Value?.ToString() ?? string.Empty;
+                        env[prop.Name] = value;
+                        def.Env[prop.Name] = value;
+                    }
+                    serverObj["env"] = env;
+                }
+
+                if (!serverObj.HasValues)
+                    return;
+
+                mcpServersObj[name] = serverObj;
+                _configuredMcpServers.Add(def);
+                included.Add(name);
+            }
+
+            if (root["mcpServers"] is JObject map)
+            {
+                foreach (var property in map.Properties())
+                {
+                    if (property.Value is JObject definition)
+                        AddServer(property.Name, definition);
                 }
             }
-            else if (json["servers"] is Newtonsoft.Json.Linq.JArray serversArr)
+            else if (root["servers"] is JArray legacy)
             {
-                foreach (var s in serversArr.OfType<Newtonsoft.Json.Linq.JObject>())
+                foreach (var definition in legacy.OfType<JObject>())
                 {
-                    var name = (s["name"]?.ToString() ?? string.Empty).Trim();
-                    if (string.IsNullOrWhiteSpace(name)) continue;
-                    if (!HasSelection() || selected.Contains(name))
-                        AppendServerFlags(parts, name, s);
+                    var name = definition["name"]?.ToString() ?? string.Empty;
+                    AddServer(name, definition);
                 }
             }
-            if (parts.Count == 0) return string.Empty;
-            return string.Join(' ', parts);
+
+            if (root["experimental_use_rmcp_client"] is JToken rmcpToken)
+            {
+                if (rmcpToken.Type == JTokenType.Boolean)
+                    result["experimental_use_rmcp_client"] = rmcpToken.Value<bool>();
+                else if (bool.TryParse(rmcpToken.ToString(), out var rmcp))
+                    result["experimental_use_rmcp_client"] = rmcp;
+            }
+
+            if (!included.Any())
+            {
+                _configuredMcpServers.Clear();
+                return null;
+            }
+
+            serverNames = included.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+            return result;
         }
-        catch { return string.Empty; }
+        catch
+        {
+            _configuredMcpServers.Clear();
+            included.Clear();
+        }
+
+        serverNames = included.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        return null;
     }
 
-    private static void AppendServerFlags(List<string> parts, string rawName, Newtonsoft.Json.Linq.JObject s)
+    private Task RefreshMcpToolInventoryAsync()
     {
+        var servers = _configuredMcpServers.Select(s => s.Clone()).ToList();
+        if (servers.Count == 0)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                foreach (var entry in McpServers)
+                    entry.Tools.Clear();
+            });
+            return Task.CompletedTask;
+        }
+
+        return Task.Run(async () =>
+        {
+            var results = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            var successServers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var discoverySkipped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var logs = new List<(string Message, bool Always)>();
+
+            foreach (var server in servers)
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(server.Url))
+                    {
+                        logs.Add(($"System: MCP server '{server.Name}' uses streamable transport; tool discovery is not yet supported.", true));
+                        results[server.Name] = new List<string>();
+                        discoverySkipped.Add(server.Name);
+                        continue;
+                    }
+
+                    var tools = await TryFetchToolsAsync(server, CancellationToken.None).ConfigureAwait(false);
+                    results[server.Name] = tools;
+                    successServers.Add(server.Name);
+                    if (tools.Count > 0)
+                        logs.Add(($"System: MCP tools • {server.Name}: {string.Join(", ", tools)}", false));
+                    else
+                        logs.Add(($"System: MCP tools • {server.Name}: none detected", false));
+                }
+                catch (Exception ex)
+                {
+                    logs.Add(($"System: MCP tool probe failed for '{server.Name}': {ex.Message}", true));
+                    results[server.Name] = new List<string>();
+                }
+            }
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                try
+                {
+                    foreach (var entry in McpServers)
+                    {
+                        entry.Tools.Clear();
+                        if (!results.TryGetValue(entry.Name, out var toolNames))
+                            continue;
+
+                        foreach (var toolName in toolNames)
+                        {
+                            entry.Tools.Add(new ToolItem
+                            {
+                                Short = toolName,
+                                Full = string.IsNullOrWhiteSpace(entry.Name) ? toolName : $"{entry.Name}.{toolName}"
+                            });
+                        }
+
+                        if (successServers.Contains(entry.Name))
+                        {
+                            var count = toolNames.Count;
+                            if (count == 0)
+                                AppendCliLog($"System: MCP '{entry.Name}' server started (no tools detected).");
+                            else
+                                AppendCliLog($"System: MCP '{entry.Name}' server started with {count} tool{(count == 1 ? string.Empty : "s")}.");
+                        }
+                        else if (discoverySkipped.Contains(entry.Name))
+                        {
+                            AppendCliLog($"System: MCP '{entry.Name}' server started (tool discovery skipped).");
+                        }
+                    }
+
+                    foreach (var (message, always) in logs)
+                    {
+                        if (_verboseLogging || always)
+                            AppendCliLog(message);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AppendCliLog("System: Failed to update MCP tools UI: " + ex.Message);
+                }
+            });
+        });
+    }
+
+    private async Task<List<string>> TryFetchToolsAsync(McpServerDefinition server, CancellationToken cancellationToken)
+    {
+        var tools = new List<string>();
+
+        if (string.IsNullOrWhiteSpace(server.Command))
+            return tools;
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = server.Command,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        if (!string.IsNullOrWhiteSpace(server.Cwd))
+        {
+            try { psi.WorkingDirectory = server.Cwd; } catch { }
+        }
+
+        foreach (var arg in server.Args)
+            psi.ArgumentList.Add(arg);
+
+        foreach (var kvp in server.Env)
+        {
+            try { psi.Environment[kvp.Key] = kvp.Value; } catch { }
+        }
+
+        using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        if (!process.Start())
+        {
+            AppendCliLog($"System: Failed to start MCP server '{server.Name}' for tool probe.");
+            return tools;
+        }
+
+        process.StandardInput.NewLine = "\n";
+        process.StandardInput.AutoFlush = true;
+
+        var sawStderr = false;
+        string? firstStderrLine = null;
+        var stderrTask = Task.Run(async () =>
+        {
+            try
+            {
+                string? errLine;
+                while ((errLine = await process.StandardError.ReadLineAsync().ConfigureAwait(false)) != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(errLine))
+                    {
+                        if (_verboseLogging)
+                        {
+                            AppendCliLog($"System: MCP '{server.Name}' stderr: {errLine}");
+                        }
+                        else
+                        {
+                            if (!sawStderr)
+                                firstStderrLine = errLine;
+                            sawStderr = true;
+                        }
+                    }
+                }
+            }
+            catch { }
+        });
+
+        var stdout = process.StandardOutput;
+        var stdin = process.StandardInput;
+
+        var timeoutSeconds = server.StartupTimeoutSec.HasValue && server.StartupTimeoutSec > 0
+            ? server.StartupTimeoutSec.Value
+            : 15.0;
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
         try
         {
-            var enabledTok = s["enabled"];
-            if (enabledTok != null && bool.TryParse(enabledTok.ToString(), out var en) && !en) return;
-            if (string.IsNullOrWhiteSpace(rawName)) return;
-            var name = new string(rawName.Select(ch => char.IsLetterOrDigit(ch) || ch == '_' || ch == '-' ? ch : '-').ToArray());
-
-            // Only stdio/local servers are supported by Codex CLI: require command
-            var cmd = (s["command"]?.ToString() ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(cmd)) return;
-
-            // args can be array or single string
-            IEnumerable<string> args = Enumerable.Empty<string>();
-            if (s["args"] is Newtonsoft.Json.Linq.JArray arr)
+            await SendJsonAsync(stdin, new JObject
             {
-                args = arr.Select(a => a?.ToString() ?? string.Empty);
-            }
-            else if (s["args"] is Newtonsoft.Json.Linq.JValue val && val.Type == Newtonsoft.Json.Linq.JTokenType.String)
-            {
-                args = new[] { val.ToString() };
-            }
-
-            var cwd = s["cwd"]?.ToString();
-            var envObj = s["env"] as Newtonsoft.Json.Linq.JObject;
-
-            parts.Add($"-c mcp_servers.{name}.command={EscapeForCli(cmd)}");
-            var argsList = args.ToList();
-            if (argsList.Count > 0) parts.Add($"-c mcp_servers.{name}.args={BuildJsonArray(argsList)}");
-            if (!string.IsNullOrWhiteSpace(cwd)) parts.Add($"-c mcp_servers.{name}.cwd={EscapeForCli(cwd!)}");
-            if (envObj != null)
-            {
-                foreach (var prop in envObj.Properties())
+                ["jsonrpc"] = "2.0",
+                ["id"] = 1,
+                ["method"] = "initialize",
+                ["params"] = new JObject
                 {
-                    var k = prop.Name;
-                    var v = prop.Value?.ToString() ?? string.Empty;
-                    parts.Add($"-c mcp_servers.{name}.env.{k}={EscapeForCli(v)}");
+                    ["clientInfo"] = new JObject
+                    {
+                        ["name"] = "semantic-developer",
+                        ["version"] = typeof(MainWindow).Assembly?.GetName().Version?.ToString() ?? "dev"
+                    },
+                    ["protocolVersion"] = "2025-06-18",
+                    ["capabilities"] = new JObject()
+                }
+            }, timeoutCts.Token).ConfigureAwait(false);
+
+            var initResponse = await ReadResponseAsync(stdout, 1, timeoutCts.Token).ConfigureAwait(false);
+            if (initResponse? ["error"] != null)
+            {
+                var message = initResponse["error"]?["message"]?.ToString() ?? "unknown error";
+                AppendCliLog($"System: MCP '{server.Name}' init failed: {message}");
+                return tools;
+            }
+
+            await SendJsonAsync(stdin, new JObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["method"] = "notifications/initialized",
+                ["params"] = new JObject()
+            }, timeoutCts.Token).ConfigureAwait(false);
+
+            await SendJsonAsync(stdin, new JObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = 2,
+                ["method"] = "tools/list",
+                ["params"] = new JObject()
+            }, timeoutCts.Token).ConfigureAwait(false);
+
+            var listResponse = await ReadResponseAsync(stdout, 2, timeoutCts.Token).ConfigureAwait(false);
+            if (listResponse? ["error"] != null)
+            {
+                var message = listResponse["error"]?["message"]?.ToString() ?? "unknown error";
+                AppendCliLog($"System: MCP '{server.Name}' list tools failed: {message}");
+                return tools;
+            }
+
+            if (listResponse? ["result"]?["tools"] is JArray toolArray)
+            {
+                foreach (var tool in toolArray.OfType<JObject>())
+                {
+                    var name = tool["name"]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(name) && !tools.Contains(name, StringComparer.OrdinalIgnoreCase))
+                        tools.Add(name);
                 }
             }
         }
-        catch { }
+        catch (OperationCanceledException)
+        {
+            AppendCliLog($"System: MCP '{server.Name}' tool probe timed out after {timeoutSeconds:F0}s.");
+        }
+        catch (Exception ex)
+        {
+            AppendCliLog($"System: MCP '{server.Name}' tool probe error: {ex.Message}");
+        }
+        finally
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    try
+                    {
+                        await SendJsonAsync(stdin, new JObject
+                        {
+                            ["jsonrpc"] = "2.0",
+                            ["method"] = "notifications/shutdown",
+                            ["params"] = new JObject()
+                        }, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch { }
+
+                    try { process.Kill(true); } catch { }
+                }
+            }
+            catch { }
+            finally
+            {
+                try { await process.WaitForExitAsync(); } catch { }
+                try { await stderrTask.ConfigureAwait(false); } catch { }
+                if (!_verboseLogging && sawStderr)
+                {
+                    var trimmed = firstStderrLine?.Trim();
+                    if (!string.IsNullOrWhiteSpace(trimmed) && trimmed.Length > 120)
+                        trimmed = trimmed.Substring(0, 120) + "…";
+                    var suffix = string.IsNullOrWhiteSpace(trimmed) ? string.Empty : $" (first line: {trimmed})";
+                    AppendCliLog($"System: MCP '{server.Name}' emitted stderr output{suffix}. Enable verbose logging for full details.");
+                }
+            }
+        }
+
+        return tools;
+    }
+
+    private static async Task SendJsonAsync(TextWriter writer, JObject payload, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var json = payload.ToString(Formatting.None);
+        await writer.WriteLineAsync(json).ConfigureAwait(false);
+        await writer.FlushAsync().ConfigureAwait(false);
+    }
+
+    private static async Task<JObject?> ReadResponseAsync(StreamReader reader, long targetId, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var message = await ReadJsonMessageAsync(reader, cancellationToken).ConfigureAwait(false);
+            if (message is null)
+                return null;
+
+            if (message.TryGetValue("id", out var idToken) && idToken != null && idToken.Type != JTokenType.Null)
+            {
+                if (TryGetRequestId(idToken, out var id) && id == targetId)
+                    return message;
+            }
+        }
+    }
+
+    private static async Task<JObject?> ReadJsonMessageAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var line = await ReadLineWithCancellationAsync(reader, cancellationToken).ConfigureAwait(false);
+            if (line is null)
+                return null;
+            line = line.Trim();
+            if (line.Length == 0)
+                continue;
+            try
+            {
+                return JObject.Parse(line);
+            }
+            catch
+            {
+                continue;
+            }
+        }
+    }
+
+    private static async Task<string?> ReadLineWithCancellationAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        var readTask = reader.ReadLineAsync();
+        var completed = await Task.WhenAny(readTask, Task.Delay(Timeout.Infinite, cancellationToken)).ConfigureAwait(false);
+        if (completed != readTask)
+            throw new OperationCanceledException(cancellationToken);
+        return await readTask.ConfigureAwait(false);
+    }
+
+    private static string SanitizeServerName(string rawName)
+    {
+        if (string.IsNullOrWhiteSpace(rawName))
+            return string.Empty;
+        return new string(rawName.Trim().Select(ch => char.IsLetterOrDigit(ch) || ch == '_' || ch == '-' ? ch : '-').ToArray());
     }
 
     private static string ParseServerNameFromTool(string toolName)
@@ -2431,6 +3172,37 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         public string Short { get; set; } = string.Empty;
         public string Full { get; set; } = string.Empty;
+    }
+
+    private class McpServerDefinition
+    {
+        public string Name { get; set; } = string.Empty;
+        public string? Command { get; set; }
+        public List<string> Args { get; } = new();
+        public string? Cwd { get; set; }
+        public Dictionary<string, string> Env { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public string? Url { get; set; }
+        public string? BearerToken { get; set; }
+        public double? StartupTimeoutSec { get; set; }
+        public double? ToolTimeoutSec { get; set; }
+
+        public McpServerDefinition Clone()
+        {
+            var clone = new McpServerDefinition
+            {
+                Name = Name,
+                Command = Command,
+                Cwd = Cwd,
+                Url = Url,
+                BearerToken = BearerToken,
+                StartupTimeoutSec = StartupTimeoutSec,
+                ToolTimeoutSec = ToolTimeoutSec
+            };
+            clone.Args.AddRange(Args);
+            foreach (var kvp in Env)
+                clone.Env[kvp.Key] = kvp.Value;
+            return clone;
+        }
     }
 
     // McpServerToolGroup removed; combined into McpServerEntry
@@ -2781,7 +3553,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         try
         {
             LoadMcpServersFromConfig();
-            AppendCliLog("System: MCP servers reloaded from config.");
+            AppendCliLogVerbose("System: MCP servers reloaded from config.");
         }
         catch (Exception ex)
         {
@@ -3098,8 +3870,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     try
                     {
                         var txt = File.ReadAllText(pkg);
-                        var obj = Newtonsoft.Json.Linq.JObject.Parse(txt);
-                        var scripts = obj["scripts"] as Newtonsoft.Json.Linq.JObject;
+                        var obj = JObject.Parse(txt);
+                        var scripts = obj["scripts"] as JObject;
                         if (scripts != null)
                         {
                             var script = scripts["dev"]?.ToString();
@@ -3402,8 +4174,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var pkg = Path.Combine(dir, "package.json");
             if (!File.Exists(pkg)) return false;
             var txt = File.ReadAllText(pkg);
-            var obj = Newtonsoft.Json.Linq.JObject.Parse(txt);
-            var scripts = obj["scripts"] as Newtonsoft.Json.Linq.JObject;
+            var obj = JObject.Parse(txt);
+            var scripts = obj["scripts"] as JObject;
             var build = scripts? ["build"]?.ToString();
             return !string.IsNullOrWhiteSpace(build);
         }
@@ -3979,44 +4751,59 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async Task SendCliInputAsync()
     {
         if (!_cli.IsRunning || string.IsNullOrWhiteSpace(CliInput)) return;
+        if (string.IsNullOrWhiteSpace(_conversationId))
+        {
+            AppendCliLog("System: Conversation not ready yet.");
+            return;
+        }
+
         var line = CliInput;
         CliInput = string.Empty;
-        // Log the user request locally with a label; de-dup against server echo later
         _pendingUserInput = line;
         if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
         AppendCliLog("You:");
         AppendCliLog(line);
+
         try
         {
-            if (_cli.UseProto)
+            var items = new JArray
             {
-                var cwd = HasWorkspace ? CurrentWorkspacePath : null;
-                var approvalPolicy = "on-request";
-                var (ok, prepared, error) = ProtoHelper.PrepareSubmission(
-                    line,
-                    cwd,
-                    _submissionShape,
-                    _contentStyle,
-                    _defaultMsgType,
-                    _currentModel,
-                    approvalPolicy,
-                    allowNetworkAccess: _allowNetworkAccess);
-                if (!ok)
+                new JObject
                 {
-                    AppendCliLog("Invalid proto submission: " + error);
-                    return;
+                    ["type"] = "text",
+                    ["data"] = new JObject { ["text"] = line }
                 }
-                try
-                {
-                    AppendCliLog($"System: Turn context • network={( _allowNetworkAccess ? "on" : "off")}");
-                }
-                catch { }
-                await _cli.SendAsync(prepared);
-            }
-            else
+            };
+
+            var sandbox = new JObject
             {
-                await _cli.SendAsync(line);
-            }
+                ["mode"] = "workspace-write",
+                ["writable_roots"] = new JArray(),
+                ["network_access"] = _allowNetworkAccess,
+                ["exclude_tmpdir_env_var"] = false,
+                ["exclude_slash_tmp"] = false
+            };
+
+            var cwd = HasWorkspace && !string.IsNullOrWhiteSpace(CurrentWorkspacePath)
+                ? CurrentWorkspacePath!
+                : Directory.GetCurrentDirectory();
+
+            var model = string.IsNullOrWhiteSpace(_currentModel) ? "gpt-5-codex" : _currentModel;
+
+            var turnParams = new JObject
+            {
+                ["conversationId"] = _conversationId,
+                ["items"] = items,
+                ["cwd"] = cwd,
+                ["approvalPolicy"] = "on-request",
+                ["sandboxPolicy"] = sandbox,
+                ["model"] = model,
+                ["effort"] = "medium",
+                ["summary"] = "auto"
+            };
+
+            AppendCliLog($"System: Turn context • network={( _allowNetworkAccess ? "on" : "off")}");
+            await SendRequestAsync("sendUserTurn", turnParams);
         }
         catch (Exception ex)
         {
@@ -4045,5 +4832,4 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return null;
     }
 
-    
 }

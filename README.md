@@ -2,22 +2,22 @@
 
 ![Semantic Developer Img](/SemanticDeveloper/SemanticDeveloper/Images/SemanticDeveloperLogo.ico)
 
-A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using its JSON protocol. It lets you:
+A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI app server using its JSON protocol. It lets you:
 
 - Select a workspace folder and browse files via a lazy file tree
 - Start a Codex session and stream assistant output in real time
-- Send user input that is wrapped as protocol `Submission`s (proto)
+- Send user input that is wrapped as protocol `Submission`s (app server)
 - Auto‑approve exec/patch requests (automatic)
 - Select a Codex profile (from `config.toml`) and load MCP servers from a JSON config
 – See live token usage and estimated context remaining in the header
 
-> Important: This app always runs Codex in proto mode via the `proto` subcommand.
+> Important: This app runs Codex through the `app-server` subcommand.
 
 ## Requirements
 
 - .NET SDK 8.0+
 - Codex CLI installed and on `PATH`
-  - Verify with: `codex proto --help`
+  - Verify with: `codex app-server --help`
 - No external Git required — uses LibGit2Sharp for repo init/staging/commit
 
 ## Build & Run
@@ -32,7 +32,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI using 
 1. Open the app, click “Select Workspace…” and choose a folder.
    - If it isn’t a git repo and the Git library is available, you’ll be prompted to initialize one.
    - You can also initialize later from the header via “Initialize Git…”.
-2. Click “Restart Session” to launch `codex proto` in the workspace directory (a session also starts automatically after you select a workspace).
+2. Click “Restart Session” to launch `codex app-server` in the workspace directory (a session also starts automatically after you select a workspace).
 3. Type into the input box and press Enter to send. Output appears in the right panel.
 4. “CLI Settings” lets you change:
    - Profile (from Codex `config.toml`) — passed via `-c profile=<name>`
@@ -154,7 +154,7 @@ Notes
 
 ## Conversation & Protocol Behavior
 
-- Always uses proto mode: the app starts the CLI with `codex proto`.
+- Always uses the Codex app server: the app starts the CLI with `codex app-server`.
 - User input is wrapped as a protocol `Submission` with a new `id` and an `op` payload:
   - Defaults to `user_input` with `items: [{ type: "text", text: "..." }]`.
   - When the app infers that a full turn is required, it sends `user_turn` and includes
@@ -175,7 +175,7 @@ Notes
   - Returns to `idle` only when the server signals `task_complete` (or `turn_aborted`).
 
 - Stop vs. Restart:
-  - Stop sends a proto `interrupt` to abort the current turn (like pressing Esc in the CLI) without killing the session; it falls back to terminating the process if needed.
+  - Stop sends an `interrupt` to the app server to abort the current turn (like pressing Esc in the CLI) without killing the session; it falls back to terminating the process if needed.
   - Restart ends the current process and starts a fresh session in the same workspace.
 
 - Clear Log clears both the on‑screen log and the underlying editor document; it does not affect the session.
@@ -206,12 +206,12 @@ Selection behavior:
 - Change selections, then click “Restart Session” to apply.
 ## Troubleshooting
 
-- “Failed to start 'codex'”: Ensure the CLI is installed and on `PATH`. Test with `codex --help` and `codex proto --help`.
+- “Failed to start 'codex'”: Ensure the CLI is installed and on `PATH`. Test with `codex --help` and `codex app-server --help`.
 - Model selection: Prefer using `config.toml` (via Profiles). You can set `model`, `model_provider`, and related options per the Codex docs.
 - Git init issues: The app uses LibGit2Sharp (no Git CLI needed). If the native lib fails to load, the app skips initialization. Commits use your configured name/email if available; otherwise a fallback signature is used.
 
 - Authentication:
-  - If you are not using an API key and the Codex CLI is not logged in (no `~/.codex/auth.json`), the proto stream returns 401. The app detects this and prompts to run `codex auth login` for you. Follow the browser flow; on success the app restarts the proto session automatically.
+  - If you are not using an API key and the Codex CLI is not logged in (no `~/.codex/auth.json`), the app-server stream returns 401. The app detects this and prompts to run `codex auth login` for you. Follow the browser flow; on success the app restarts the session automatically.
   - If your CLI version doesn’t support `auth login`, the app falls back to `codex login`.
   - When “Use API Key” is enabled in CLI Settings, the app attempts a non‑interactive `codex login --api-key <key>` before sessions and on 401. If login succeeds, it restarts the session automatically.
 
@@ -235,7 +235,7 @@ Selection behavior:
 
 ## Notes
 
-- Proto mode is enforced in code; the app does not fall back to non‑proto modes.
+- App-server mode is enforced in code; the app does not fall back to legacy proto mode.
 - Settings are stored under the OS‑specific application data directory and loaded on startup.
 - The log view uses AvaloniaEdit + TextMate (Dark+) for better legibility and simple JSON syntax coloring.
 
