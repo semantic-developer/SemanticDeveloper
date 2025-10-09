@@ -2,335 +2,116 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:SemanticDeveloper"
-        xmlns:models="clr-namespace:SemanticDeveloper.Models"
-        xmlns:ae="clr-namespace:AvaloniaEdit;assembly=AvaloniaEdit"
-        mc:Ignorable="d" d:DesignWidth="1100" d:DesignHeight="720"
+        xmlns:views="clr-namespace:SemanticDeveloper.Views"
         x:Class="SemanticDeveloper.MainWindow"
         x:CompileBindings="False"
+        mc:Ignorable="d"
+        d:DesignWidth="1200"
+        d:DesignHeight="780"
         Title="Semantic Developer"
         Icon="avares://SemanticDeveloper/Images/semantic-developer-logo-large.png"
         WindowState="Maximized">
-    <Grid RowDefinitions="Auto,*" ColumnDefinitions="*">
-        <!-- Top toolbar -->
-        <Border Background="#2B2B2B" Padding="12">
-            <Grid ColumnDefinitions="Auto,12,*,Auto,8,Auto,8,Auto,12,Auto,8,Auto,8,Auto,8,Auto">
-                <Button x:Name="SelectWorkspaceButton" Foreground="#E6E6E6" Click="OnSelectWorkspaceClick">Select Workspace…</Button>
+    <Grid RowDefinitions="Auto,*">
+        <!-- Global header -->
+        <Border Background="#2B2B2B" Padding="8,6">
+            <Grid ColumnDefinitions="Auto,12,*,Auto,8,Auto,8,Auto">
+                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <Image Source="avares://SemanticDeveloper/Images/semantic-developer-logo-large.png"
+                           Width="24" Height="24"/>
+                    <TextBlock Text="Semantic Developer" FontWeight="Bold" Foreground="#E6E6E6" FontSize="16"/>
+                </StackPanel>
                 <Border Grid.Column="1"/>
-                <TextBlock Grid.Column="2" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Foreground="#E6E6E6">
-                    <Run Text="Workspace: "/>
-                    <Run Text="{Binding CurrentWorkspacePath}"/>
-                </TextBlock>
-                <TextBlock Grid.Column="3" VerticalAlignment="Center" Foreground="#E6E6E6" IsVisible="{Binding HasSelectedProfile}">
-                    <Run Text=" • Profile: "/>
-                    <Run Text="{Binding SelectedProfile}"/>
-                </TextBlock>
+                <Border Grid.Column="2"/>
+                <Button Grid.Column="3" x:Name="OpenCliSettingsButton" Foreground="#E6E6E6"
+                        Click="OnOpenCliSettingsClick">CLI Settings</Button>
                 <Border Grid.Column="4"/>
-                <TextBlock Grid.Column="5" VerticalAlignment="Center" Foreground="#E6E6E6" IsVisible="{Binding IsGitRepo}">
-                    <Run Text="  •  Branch: "/>
-                    <Run Text="{Binding CurrentBranch}"/>
-                </TextBlock>
+                <Button Grid.Column="5" x:Name="OpenAboutButton" Foreground="#E6E6E6"
+                        Click="OnOpenAboutClick">About</Button>
                 <Border Grid.Column="6"/>
-                <Button Grid.Column="7" x:Name="GitMenuButton" Foreground="#E6E6E6" IsVisible="{Binding IsGitRepo}">Git ▾
-                    <Button.Flyout>
-                        <MenuFlyout>
-                            <MenuItem Header="Commit…" Click="OnGitCommitClick"/>
-                            <MenuItem Header="New Branch…" Click="OnGitNewBranchClick"/>
-                            <MenuItem Header="Switch Branch…" Click="OnGitSwitchBranchClick"/>
-                            <MenuItem Header="Get Latest" Click="OnGitGetLatestClick"/>
-                            <MenuItem Header="Refresh" Click="OnGitRefreshClick"/>
-                        </MenuFlyout>
-                    </Button.Flyout>
-                </Button>
-                <Button Grid.Column="7" x:Name="InitGitButton" Foreground="#E6E6E6" IsVisible="{Binding CanInitGit}" Click="OnGitInitClick">Initialize Git…</Button>
-                <Button Grid.Column="9" x:Name="OpenInFileManagerButton" Foreground="#E6E6E6" Click="OnOpenInFileManagerClick" IsEnabled="{Binding HasWorkspace}">Open in File Manager</Button>
-                <Border Grid.Column="10"/>
-                <Button Grid.Column="11" x:Name="OpenCliSettingsButton" Foreground="#E6E6E6" Click="OnOpenCliSettingsClick">CLI Settings</Button>
-                <Border Grid.Column="12"/>
-                <Button Grid.Column="13" x:Name="OpenAboutButton" Foreground="#E6E6E6" Click="OnOpenAboutClick">About</Button>
-                <Border Grid.Column="14"/>
-                <Button Grid.Column="15" x:Name="OpenReadmeButton" Foreground="#E6E6E6"
+                <Button Grid.Column="7" x:Name="OpenReadmeButton" Foreground="#E6E6E6"
                         Click="OnOpenReadmeClick" ToolTip.Tip="Open README">?</Button>
             </Grid>
         </Border>
 
-        <!-- Body split: left file tree, right CLI output -->
-        <Grid Grid.Row="1">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="230" MinWidth="230"/>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*" MinWidth="520"/>
-            </Grid.ColumnDefinitions>
-            <!-- Left: directory tree -->
-            <Border BorderBrush="#333" BorderThickness="0,0,1,0" Background="#1F1F1F">
-                <Grid RowDefinitions="Auto,*,Auto,*">
-                    <TextBlock Margin="10,8" FontWeight="SemiBold" Text="Workspace Files" Foreground="#E6E6E6"/>
-                    <TreeView x:Name="WorkspaceTree" Grid.Row="1" ItemsSource="{Binding TreeRoots}" SelectionChanged="OnTreeSelectionChanged">
-                        <TreeView.DataTemplates>
-                            <TreeDataTemplate DataType="models:FileTreeItem" ItemsSource="{Binding Children}">
-                                <Grid ColumnDefinitions="Auto,6,*" VerticalAlignment="Center">
-                                    <Grid.ContextMenu>
-                                        <ContextMenu>
-                                            <MenuItem Header="Create AGENTS.md"
-                                                      IsVisible="{Binding IsDirectory}"
-                                                      CommandParameter="{Binding}"
-                                                      Click="OnCreateAgentsFileClick"/>
-                                            <MenuItem Header="Delete" CommandParameter="{Binding}" Click="OnDeleteTreeItemClick"/>
-                                        </ContextMenu>
-                                    </Grid.ContextMenu>
-                                    <Grid Width="16" Height="16" VerticalAlignment="Center" ClipToBounds="True">
-                                        <Path Width="16" Height="16"
-                                              Data="{Binding IconGeometry}"
-                                              Fill="#CFCFCF"
-                                              Stretch="Uniform"/>
-                                        <TextBlock Text="{Binding GitStatusLetter}"
-                                                   IsVisible="{Binding HasStatusLetter}"
-                                                   Foreground="#444444"
-                                                   FontSize="10"
-                                                   FontWeight="Bold"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center"
-                                                   TextAlignment="Center"
-                                                   Margin="-3,0,0,0"/>
-                                    </Grid>
-                                    <TextBlock Grid.Column="2" Text="{Binding Name}" Foreground="#E6E6E6" VerticalAlignment="Center"/>
-                                </Grid>
-                            </TreeDataTemplate>
-                        </TreeView.DataTemplates>
-                    </TreeView>
-                    <!-- Splitter between file tree and MCP tools panel -->
-                    <GridSplitter Grid.Row="2" Height="5" Background="#2A2A2A" HorizontalAlignment="Stretch"
-                                  ResizeDirection="Rows"/>
-                    <!-- MCP servers + tools panel -->
-                    <Border Grid.Row="3" Background="#1B1B1B" BorderBrush="#333" BorderThickness="1,1,0,0" Padding="8">
-                        <Grid RowDefinitions="Auto,*">
-                            <!-- Header with gear + refresh -->
-                            <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="0,0,0,6">
-                                <TextBlock FontWeight="SemiBold" Text="MCP" Foreground="#E6E6E6" VerticalAlignment="Center"/>
-                                <Button Width="22" Height="22"
-                                        HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
-                                        Padding="0" Click="OnOpenMcpConfigClick" ToolTip.Tip="Open mcp_servers.json">⚙</Button>
-                                <Button Width="22" Height="22"
-                                        HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
-                                        Padding="0" Click="OnMcpRefreshConfigClick" ToolTip.Tip="Refresh servers">↻</Button>
-                            </StackPanel>
-
-                            <!-- Combined servers + tools with vertical scroll -->
-                            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0">
-                                <StackPanel HorizontalAlignment="Stretch" Spacing="6">
-                                    <TextBlock TextWrapping="Wrap" Foreground="#AAAAAA" FontSize="12"
-                                               Text="No MCP servers configured yet. Click ⚙ to open mcp_servers.json and add your servers using Semantic Developer's JSON format."
-                                               IsVisible="{Binding HasNoMcpServers}"/>
-                                    <TextBlock TextWrapping="Wrap" Foreground="#AAAAAA" FontSize="12"
-                                               Text="MCP support is currently disabled. Enable it under CLI Settings so selected servers are passed to Codex."
-                                               IsVisible="{Binding IsMcpDisabled}"/>
-                                    <ItemsControl ItemsSource="{Binding McpServers}" HorizontalAlignment="Stretch">
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate>
-                                                <Expander IsExpanded="False" Padding="0" Margin="0,2,0,2" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                                                    <Expander.Header>
-                                                        <Grid ColumnDefinitions="Auto,6,*" Margin="0">
-                                                            <!-- Slightly smaller checkbox to reduce visual weight -->
-                                                            <CheckBox Grid.Column="0" IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center" FontSize="10"/>
-                                                            <Border Grid.Column="1"/>
-                                                            <TextBlock Grid.Column="2" Text="{Binding Name}" VerticalAlignment="Center"/>
-                                                        </Grid>
-                                                    </Expander.Header>
-                                                    <ItemsControl ItemsSource="{Binding Tools}" Margin="0,2,0,0" HorizontalAlignment="Stretch">
-                                                        <ItemsControl.ItemTemplate>
-                                                            <DataTemplate>
-                                                                <TextBlock Text="{Binding Short}" ToolTip.Tip="{Binding Full}" Margin="16,0,0,0"/>
-                                                            </DataTemplate>
-                                                        </ItemsControl.ItemTemplate>
-                                                    </ItemsControl>
-                                                </Expander>
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
-                                </StackPanel>
-                            </ScrollViewer>
-                        </Grid>
-                    </Border>
-                </Grid>
+        <!-- Sessions tab area -->
+        <DockPanel Grid.Row="1" Background="#1A1A1A">
+            <Border DockPanel.Dock="Top" Background="#232323" Padding="12,4">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <TabControl x:Name="SessionTabControl"
+                            ItemsSource="{Binding Sessions}"
+                            SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
+                            Margin="0"
+                            Padding="0"
+                            HorizontalContentAlignment="Stretch"
+                            BorderThickness="0"
+                            Background="Transparent"
+                            MinHeight="30"
+                            HorizontalAlignment="Left">
+                        <TabControl.Styles>
+                            <Style Selector="TabControl#SessionTabControl > TabItem">
+                                <Setter Property="Padding" Value="8,2"/>
+                                <Setter Property="Margin" Value="0,0,6,0"/>
+                                <Setter Property="FontSize" Value="12"/>
+                                <Setter Property="Foreground" Value="#E6E6E6"/>
+                                <Setter Property="Background" Value="Transparent"/>
+                                <Setter Property="BorderBrush" Value="Transparent"/>
+                                <Setter Property="MinHeight" Value="0"/>
+                                <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                                <Setter Property="VerticalContentAlignment" Value="Center"/>
+                                <Setter Property="Template">
+                                    <ControlTemplate TargetType="TabItem">
+                                        <Border x:Name="border"
+                                                Background="{TemplateBinding Background}"
+                                                BorderBrush="{TemplateBinding BorderBrush}"
+                                                BorderThickness="{TemplateBinding BorderThickness}"
+                                                Padding="{TemplateBinding Padding}"
+                                                Margin="{TemplateBinding Margin}">
+                                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                                              Content="{TemplateBinding Header}"
+                                                              ContentTemplate="{TemplateBinding HeaderTemplate}"/>
+                                        </Border>
+                                    </ControlTemplate>
+                                </Setter>
+                            </Style>
+                            <Style Selector="TabControl#SessionTabControl > TabItem /template/ Border#border">
+                                <Setter Property="BorderBrush" Value="Transparent"/>
+                                <Setter Property="BorderThickness" Value="0"/>
+                            </Style>
+                            <Style Selector="TabControl#SessionTabControl > TabItem:selected /template/ Border#border">
+                                <Setter Property="BorderBrush" Value="#4CAF50"/>
+                                <Setter Property="BorderThickness" Value="0,0,0,2"/>
+                            </Style>
+                            <Style Selector="TabControl#SessionTabControl > TabItem:pointerover /template/ Border#border">
+                                <Setter Property="Background" Value="#2D2D2D"/>
+                            </Style>
+                        </TabControl.Styles>
+                        <TabControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Header}" FontSize="12" Foreground="#E6E6E6" FontWeight="Normal"/>
+                            </DataTemplate>
+                        </TabControl.ItemTemplate>
+                        <TabControl.ContentTemplate>
+                            <DataTemplate>
+                                <ContentControl IsVisible="False"/>
+                            </DataTemplate>
+                        </TabControl.ContentTemplate>
+                    </TabControl>
+                    <Button Margin="6,0,0,0"
+                            Padding="6,0"
+                            MinWidth="28"
+                            Height="28"
+                            FontSize="16"
+                            VerticalAlignment="Center"
+                            BorderThickness="0"
+                            Background="Transparent"
+                            Content="+"
+                            Click="OnAddSessionClick"/>
+                </StackPanel>
             </Border>
-            <!-- Splitter -->
-            <GridSplitter Grid.Column="1" Width="5" Background="#2A2A2A" HorizontalAlignment="Stretch"
-                          ResizeDirection="Columns" ShowsPreview="True"/>
-
-            <!-- Middle: Editor / Compare pane -->
-            <Grid x:Name="EditorPaneGrid" Grid.Column="2" RowDefinitions="Auto,*" SizeChanged="OnEditorPaneSizeChanged" ClipToBounds="True">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Top" Margin="10" Spacing="8">
-                    <TextBlock FontWeight="SemiBold" Text="Editor"/>
-                    <TextBlock Text="—"/>
-                    <TextBlock TextTrimming="CharacterEllipsis" Text="{Binding SelectedFileName}"/>
-                    <StackPanel x:Name="EditorButtonsPanel" Orientation="Horizontal" Spacing="6" Margin="20,0,0,0">
-                        <Button x:Name="EditorViewCurrentButton" Click="OnEditorViewCurrentClick">Current File</Button>
-                        <Button x:Name="EditorViewCompareButton" Click="OnEditorViewCompareClick">Compare with Git</Button>
-                    </StackPanel>
-                </StackPanel>
-
-                <!-- Single editor panel -->
-                <Grid x:Name="EditorSinglePanel" Grid.Row="1" Margin="10" RowDefinitions="Auto,*">
-                    <!-- Small header with Save button -->
-                    <Border Background="#1A1A1A" BorderBrush="#333" BorderThickness="1" CornerRadius="4,4,0,0" Padding="6,4">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button x:Name="SaveCurrentFileButton1" Click="OnSaveCurrentFileClick">Save</Button>
-                        </StackPanel>
-                    </Border>
-                    <Border Grid.Row="1" BorderBrush="#555" BorderThickness="1" CornerRadius="0,0,4,4">
-                        <Grid>
-                            <ae:TextEditor x:Name="EditorCurrent"
-                                Document="{Binding CurrentFileDocument, Mode=OneWay}"
-                                IsReadOnly="False"
-                                WordWrap="False"
-                                ShowLineNumbers="True"
-                                Background="#0A0A0A"
-                                Foreground="#E6E6E6"
-                                FontFamily="Consolas, Menlo, monospace"
-                                FontSize="13" />
-                            <Image x:Name="ImageCurrent" Stretch="Uniform" IsVisible="False"/>
-                        </Grid>
-                    </Border>
-                </Grid>
-
-                <!-- Compare panel (side-by-side) -->
-                <Grid x:Name="EditorComparePanel" Grid.Row="1" ColumnDefinitions="*,5,*" RowDefinitions="Auto,*" Margin="10" IsVisible="False">
-                    <!-- Headers for alignment -->
-                    <Border Grid.Column="0" Grid.Row="0" Background="#1A1A1A" BorderBrush="#333" BorderThickness="1" CornerRadius="4,4,0,0" Padding="6,4">
-                        <TextBlock Text="Base (HEAD)" Foreground="#CCC"/>
-                    </Border>
-                    <Border Grid.Column="2" Grid.Row="0" Background="#1A1A1A" BorderBrush="#333" BorderThickness="1" CornerRadius="4,4,0,0" Padding="6,4">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button x:Name="SaveCurrentFileButton2" Click="OnSaveCurrentFileClick">Save</Button>
-                            <TextBlock Text="Working Copy" Foreground="#CCC"/>
-                        </StackPanel>
-                    </Border>
-
-                    <Border Grid.Column="0" Grid.Row="1" BorderBrush="#555" BorderThickness="1" CornerRadius="0,0,4,4">
-                        <Grid>
-                            <ae:TextEditor x:Name="EditorBase"
-                                Document="{Binding BaseFileDocument, Mode=OneWay}"
-                                IsReadOnly="True"
-                                WordWrap="False"
-                                ShowLineNumbers="True"
-                                Background="#0A0A0A"
-                                Foreground="#E6E6E6"
-                                FontFamily="Consolas, Menlo, monospace"
-                                FontSize="13" />
-                            <Image x:Name="ImageBase" Stretch="Uniform" IsVisible="False"/>
-                        </Grid>
-                    </Border>
-                    <GridSplitter Grid.Column="1" Grid.Row="1" Width="5" Background="#2A2A2A" HorizontalAlignment="Stretch"
-                                  ResizeDirection="Columns" ShowsPreview="True"/>
-                    <Border Grid.Column="2" Grid.Row="1" BorderBrush="#555" BorderThickness="1" CornerRadius="0,0,4,4">
-                        <Grid>
-                            <ae:TextEditor x:Name="EditorCurrent2"
-                                Document="{Binding CurrentFileDocument, Mode=OneWay}"
-                                IsReadOnly="False"
-                                WordWrap="False"
-                                ShowLineNumbers="True"
-                                Background="#0A0A0A"
-                                Foreground="#E6E6E6"
-                                FontFamily="Consolas, Menlo, monospace"
-                                FontSize="13" />
-                            <Image x:Name="ImageCurrent2" Stretch="Uniform" IsVisible="False"/>
-                        </Grid>
-                    </Border>
-                </Grid>
-            </Grid>
-
-            <!-- Splitter between middle editor pane and right pane -->
-            <GridSplitter Grid.Column="3" Width="5" Background="#2A2A2A" HorizontalAlignment="Stretch"
-                          ResizeDirection="Columns" ShowsPreview="True"/>
-
-            <!-- Right: CLI session area -->
-            <Grid x:Name="RightPaneGrid" Grid.Column="4" RowDefinitions="Auto,Auto,*,Auto" MinWidth="525" SizeChanged="OnRightPaneSizeChanged">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Top" Margin="10" Spacing="8">
-                    <TextBlock FontWeight="SemiBold" Text="Codex CLI Session"/>
-                    <TextBlock Text="—"/>
-                    <TextBlock Text="{Binding SessionStatus}"/>
-                    <TextBlock Text="•" Margin="8,0,0,0"/>
-                    <TextBlock Text="{Binding TokenStats}"/>
-                    
-                </StackPanel>
-
-                <ProgressBar Grid.Row="1" Height="4" Margin="10,0,10,4" IsIndeterminate="True"
-                              IsVisible="{Binding IsBusy}" Foreground="#AA76FF03" Background="#10FFFFFF"
-                              Opacity="0.15" IsHitTestVisible="False"/>
-
-                <Border Grid.Row="2" Margin="10" BorderBrush="#DDD" BorderThickness="1" CornerRadius="4">
-                    <ae:TextEditor x:Name="LogEditor"
-                        Document="{Binding CliLogDocument, Mode=OneWay}"
-                        IsReadOnly="True"
-                        WordWrap="True"
-                        ShowLineNumbers="False"
-                        Background="#0A0A0A"
-                        Foreground="#E6E6E6"
-                        FontFamily="Consolas, Menlo, monospace"
-                        FontSize="13" />
-                </Border>
-
-                <StackPanel Grid.Row="3" Orientation="Vertical" Margin="10" Spacing="8">
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Button x:Name="RestartCliButton" Click="OnRestartCliClick" IsEnabled="{Binding HasWorkspace}">Restart Session</Button>
-                        <Button x:Name="StopCliButton" Click="OnStopCliClick" IsEnabled="{Binding IsCliRunning}">Stop</Button>
-                        <Button x:Name="ClearLogButton" Click="OnClearLogClick">Clear Log</Button>
-                        <Button x:Name="RunAppButton" Click="OnRunAppClick" IsEnabled="{Binding HasWorkspace}">Run App</Button>
-                        <Button x:Name="PromptsButton" Click="OnPromptsButtonClick" IsEnabled="{Binding IsCliRunning}">Prompts ▾</Button>
-                        <Button x:Name="OpenShellButton" Click="OnOpenShellClick">Shell</Button>
-                    </StackPanel>
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                        <TextBox Grid.Column="0" x:Name="CliInputTextBox"
-                                 Watermark="Type input and press Enter"
-                                 TextWrapping="Wrap"
-                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
-                                 AcceptsReturn="True"
-                                 Height="60"
-                                 Text="{Binding CliInput, Mode=TwoWay}"
-                                 KeyDown="OnCliInputKeyDown"/>
-                        <Button Grid.Column="1" x:Name="SendCliInputButton" Click="OnSendCliInputClick" IsEnabled="{Binding IsCliRunning}" IsDefault="True">Send</Button>
-                    </Grid>
-                </StackPanel>
-                
-                <!-- Shell modal overlay on a canvas for precise positioning -->
-                <Canvas x:Name="ShellOverlay" Grid.RowSpan="3" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
-                    <Border x:Name="ShellPanel" IsVisible="{Binding IsShellPanelOpen}"
-                            MinWidth="380" Height="100"
-                            Background="#1A1A1A" BorderBrush="#22FFFFFF" BorderThickness="1" CornerRadius="6">
-                        <Grid>
-                            <!-- Close 'x' in corner -->
-                            <Button Content="✕" Width="20" Height="20"
-                                    HorizontalAlignment="Right" VerticalAlignment="Top"
-                                    Margin="0,0,0,0" Padding="0"
-                                    Click="OnCloseShellClick"/>
-                            <StackPanel Orientation="Vertical" Margin="8,6,28,6" Spacing="6">
-                                <!-- Prompt line above input -->
-                                <StackPanel Orientation="Horizontal" Spacing="6">
-                                    <TextBlock VerticalAlignment="Center" FontFamily="Consolas, Menlo, monospace" Foreground="#CFCFCF" Text="{Binding ShellPromptPath}"/>
-                                    <TextBlock VerticalAlignment="Center" FontFamily="Consolas, Menlo, monospace" Foreground="#CFCFCF" Text="$"/>
-                                </StackPanel>
-                                <!-- Input and Run button -->
-                                <Grid ColumnDefinitions="*,Auto">
-                                    <TextBox Grid.Column="0" x:Name="ShellInputTextBox"
-                                             FontFamily="Consolas, Menlo, monospace"
-                                             Background="#0A0A0A"
-                                             Foreground="#E6E6E6"
-                                             Watermark="Enter command"
-                                             HorizontalAlignment="Stretch"
-                                             MinWidth="120"
-                                             Padding="0, 0, 2, 0"
-                                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                             KeyDown="OnShellInputKeyDown"/>
-                                    <Button Grid.Column="1" Padding="8,0,8,0" x:Name="RunShellButton" Click="OnRunShellClick">Run</Button>
-                                </Grid>
-                            </StackPanel>
-                        </Grid>
-                    </Border>
-                </Canvas>
-            </Grid>
-        </Grid>
+            <Border Margin="0" BorderThickness="0" Background="#1A1A1A">
+                <ContentControl Content="{Binding SelectedSession.View}"/>
+            </Border>
+        </DockPanel>
     </Grid>
 </Window>
