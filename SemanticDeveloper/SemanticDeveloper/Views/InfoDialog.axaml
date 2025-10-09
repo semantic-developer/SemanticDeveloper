@@ -1,0 +1,22 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="SemanticDeveloper.Views.InfoDialog"
+        Width="460" Height="260"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Title="Information"
+        Background="#2E2E2E"
+        Icon="avares://SemanticDeveloper/Images/semantic-developer-logo-large.png">
+    <Grid RowDefinitions="*,Auto" Margin="16">
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+            <TextBlock x:Name="MessageText"
+                       TextWrapping="Wrap"
+                       Foreground="#E6E6E6"
+                       Margin="0,0,0,8"/>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Width="96" Click="OnClose" IsDefault="True">OK</Button>
+        </StackPanel>
+    </Grid>
+</Window>

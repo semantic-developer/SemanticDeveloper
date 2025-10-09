@@ -9,6 +9,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI app se
 - Send user input that is wrapped as protocol `Submission`s (app server)
 - Auto‑approve exec/patch requests (automatic)
 - Select a Codex profile (from `config.toml`) and load MCP servers from a JSON config
+- Keep multiple Codex sessions active at once using the tabbed header (each tab title shows its live status, e.g., `Session 2 – thinking…`)
 – See live token usage and estimated context remaining in the header
 
 > Important: This app runs Codex through the `app-server` subcommand.
@@ -43,6 +44,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI app se
 - Use API Key for Codex CLI (pipes the key to `codex login --with-api-key` before sessions; does not rely on existing CLI auth)
   - Allow network access for tools (sets sandbox_policy.network_access=true on turns so MCP tools can reach the network)
   - Without API key enabled, the app proactively authenticates with `codex auth login` (falling back to `codex login`) before sessions so your chat/GPT token is used.
+5. Need a second workspace or want to keep another Codex stream alive? Hit the **+** button next to the session tabs to spin up a parallel session—tab titles update in real time so you can see whether each workspace is `disconnected`, `thinking…`, or `idle`.
 
 ### Directory Guardrails with `AGENTS.md`
 

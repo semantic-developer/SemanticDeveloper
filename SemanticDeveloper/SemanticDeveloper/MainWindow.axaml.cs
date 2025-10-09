@@ -5,9 +5,11 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
 using SemanticDeveloper.Models;
 using SemanticDeveloper.Services;
 using SemanticDeveloper.Views;
+using System.Threading.Tasks;
 
 namespace SemanticDeveloper;
 
@@ -17,6 +19,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private SessionTab? _selectedSession;
     private int _sessionCounter = 0;
     private AppSettings _sharedSettings;
+    private bool _profileCheckPerformed;
 
     public MainWindow()
     {
@@ -82,17 +85,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (SelectedSession is null)
             return;
 
-        var updated = await SelectedSession.View.ShowCliSettingsDialogAsync(_sharedSettings);
-        if (updated is null)
-            return;
-
-        _sharedSettings = CloneAppSettings(updated);
-        foreach (var session in _sessions)
-        {
-            if (session == SelectedSession)
-                continue;
-            session.View.ApplySettingsSnapshot(_sharedSettings);
-        }
+        await OpenCliSettingsAsync(SelectedSession);
     }
 
     private async void OnOpenAboutClick(object? sender, RoutedEventArgs e)
@@ -128,6 +121,58 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public new event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged([CallerMemberName] string? name = null)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+    protected override void OnOpened(EventArgs e)
+    {
+        base.OnOpened(e);
+        Dispatcher.UIThread.Post(async () => await EnsureProfilesConfiguredAsync());
+    }
+
+    private async Task EnsureProfilesConfiguredAsync()
+    {
+        if (_profileCheckPerformed)
+            return;
+        _profileCheckPerformed = true;
+
+        try
+        {
+            var profiles = CodexConfigService.TryGetProfiles();
+            if (profiles.Count > 0)
+                return;
+
+            var info = new InfoDialog
+            {
+                Title = "Add a Codex Profile",
+                Message = "No Codex CLI profiles were found in ~/.codex/config.toml.\n\nCreate a profile under [profiles.<name>] with the model you want to use, for example:\n\n[profiles.default]\nmodel = \"gpt-5-codex\"\nmodel_provider = \"openai\"\n\nAfter you add a profile, select it in CLI Settings so sessions know which model to run."
+            };
+
+            await info.ShowDialog(this);
+
+            if (SelectedSession is not null)
+            {
+                await OpenCliSettingsAsync(SelectedSession);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Failed to prompt for profile setup: {ex.Message}");
+        }
+    }
+
+    private async Task OpenCliSettingsAsync(SessionTab session)
+    {
+        var updated = await session.View.ShowCliSettingsDialogAsync(_sharedSettings);
+        if (updated is null)
+            return;
+
+        _sharedSettings = CloneAppSettings(updated);
+        foreach (var other in _sessions)
+        {
+            if (other == session)
+                continue;
+            other.View.ApplySettingsSnapshot(_sharedSettings);
+        }
+    }
 
     private static AppSettings CloneAppSettings(AppSettings source) => new()
     {
@@ -169,11 +214,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         public void UpdateHeader()
         {
-            Header = $"{Title} - {View.SessionStatus}";
-        }
-
-        public event PropertyChangedEventHandler? PropertyChanged;
-        private void OnPropertyChanged([CallerMemberName] string? name = null)
-            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        Header = $"{Title} - {View.SessionStatus}";
     }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+}
 }
