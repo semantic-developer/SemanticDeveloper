@@ -73,6 +73,16 @@
                                         </Border>
                                     </ControlTemplate>
                                 </Setter>
+                                <Setter Property="ContextMenu">
+                                    <ContextMenu>
+                                        <MenuItem Header="Rename..."
+                                                  CommandParameter="{Binding $parent[TabItem].DataContext}"
+                                                  Click="OnRenameTabClick"/>
+                                        <MenuItem Header="Close"
+                                                  CommandParameter="{Binding $parent[TabItem].DataContext}"
+                                                  Click="OnCloseTabClick"/>
+                                    </ContextMenu>
+                                </Setter>
                             </Style>
                             <Style Selector="TabControl#SessionTabControl > TabItem /template/ Border#border">
                                 <Setter Property="BorderBrush" Value="Transparent"/>

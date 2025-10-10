@@ -1,6 +1,6 @@
 ; Inno Setup script to package SemanticDeveloper
 #define AppName "SemanticDeveloper"
-#define AppVersion "1.0.1"
+#define AppVersion "1.0.5"
 #define Publisher "Stainless Designer LLC"
 #define URL "https://github.com/stainless-design/semantic-developer"
 #ifndef RID

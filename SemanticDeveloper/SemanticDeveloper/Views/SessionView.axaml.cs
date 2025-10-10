@@ -36,6 +36,8 @@ namespace SemanticDeveloper.Views;
 
 public partial class SessionView : UserControl, INotifyPropertyChanged
 {
+    public event EventHandler? SessionClosedRequested;
+
     private readonly CodexCliService _cli = new();
     private string? _currentModel;
     // Auto-approval UI removed; approvals require manual handling
@@ -113,7 +115,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         InitializeComponent();
 
         DataContext = this;
-
+        
         McpServers.CollectionChanged += (_, __) =>
         {
             OnPropertyChanged(nameof(HasMcpServers));
@@ -2654,13 +2656,18 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                     new JObject { ["conversationId"] = _conversationId }
                 );
             }
-            SetStatusSafe("idle");
         }
         catch
         {
-            _cli.Stop();
+        }
+        finally
+        {
+            try { _cli.Stop(); } catch { }
             IsCliRunning = false;
             SessionStatus = "stopped";
+            _conversationId = null;
+            _conversationSubscriptionId = null;
+            _appServerInitialized = false;
         }
     }
 
@@ -3523,6 +3530,37 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         try { _logEditor?.ScrollToHome(); } catch { }
     }
 
+    public async Task ShutdownAsync()
+    {
+        try
+        {
+            var shutdownTask = InterruptCliAsync();
+            var completed = await Task.WhenAny(shutdownTask, Task.Delay(TimeSpan.FromSeconds(2)));
+            if (completed == shutdownTask)
+            {
+                await shutdownTask;
+            }
+            else
+            {
+                ForceStop();
+            }
+        }
+        catch
+        {
+            ForceStop();
+        }
+    }
+
+    public void ForceStop()
+    {
+        try { _cli.Stop(); } catch { }
+        IsCliRunning = false;
+        SessionStatus = "stopped";
+        _conversationId = null;
+        _conversationSubscriptionId = null;
+        _appServerInitialized = false;
+    }
+
     private void OnOpenInFileManagerClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (!HasWorkspace || CurrentWorkspacePath is null) return;
@@ -3546,6 +3584,10 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
             AppendCliLog("System: Failed to open file manager: " + ex.Message);
         }
     }
+
+    private void OnCloseSessionClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+        => SessionClosedRequested?.Invoke(this, EventArgs.Empty);
+
 
     public async Task<AppSettings?> ShowCliSettingsDialogAsync(AppSettings? seed = null)
     {

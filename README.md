@@ -45,6 +45,7 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI app se
   - Allow network access for tools (sets sandbox_policy.network_access=true on turns so MCP tools can reach the network)
   - Without API key enabled, the app proactively authenticates with `codex auth login` (falling back to `codex login`) before sessions so your chat/GPT token is used.
 5. Need a second workspace or want to keep another Codex stream alive? Hit the **+** button next to the session tabs to spin up a parallel session—tab titles update in real time so you can see whether each workspace is `disconnected`, `thinking…`, or `idle`.
+6. Right-click a tab to rename it or use the per-session **Close Tab** button/context menu to shut it down when you are done.
 
 ### Directory Guardrails with `AGENTS.md`
 
