@@ -11,7 +11,7 @@
     <Grid RowDefinitions="Auto,*" ColumnDefinitions="*">
         <!-- Top toolbar -->
         <Border Background="#2B2B2B" Padding="8,6">
-            <Grid ColumnDefinitions="Auto,12,*,Auto,8,Auto,8,Auto,12,Auto">
+            <Grid ColumnDefinitions="Auto,12,*,Auto,8,Auto,8,Auto,12,Auto,8,Auto">
                 <Button x:Name="SelectWorkspaceButton" Foreground="#E6E6E6" Padding="10,4" Click="OnSelectWorkspaceClick">Select Workspace…</Button>
                 <Border Grid.Column="1"/>
                 <TextBlock Grid.Column="2" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Foreground="#E6E6E6" Margin="0,0,6,0">
@@ -39,8 +39,10 @@
                         </MenuFlyout>
                     </Button.Flyout>
                 </Button>
-                <Button Grid.Column="7" x:Name="InitGitButton" Foreground="#E6E6E6" IsVisible="{Binding CanInitGit}" Click="OnGitInitClick">Initialize Git…</Button>
-                <Button Grid.Column="9" x:Name="OpenInFileManagerButton" Foreground="#E6E6E6" Padding="8,4" Margin="0,0,0,0" Click="OnOpenInFileManagerClick" IsEnabled="{Binding HasWorkspace}">Open in File Manager</Button>
+                <Button Grid.Column="7" x:Name="InitGitButton" Foreground="#E6E6E6" Padding="8,4" IsVisible="{Binding CanInitGit}" Click="OnGitInitClick">Initialize Git…</Button>
+                <Button Grid.Column="9" x:Name="OpenInFileManagerButton" Foreground="#E6E6E6" Padding="8,4" Click="OnOpenInFileManagerClick" IsEnabled="{Binding HasWorkspace}">Open in File Manager</Button>
+                <Border Grid.Column="10"/>
+                <Button Grid.Column="11" x:Name="CloseSessionButton" Foreground="#E6E6E6" Padding="6,4" Click="OnCloseSessionClick">Close Tab</Button>
             </Grid>
         </Border>
 

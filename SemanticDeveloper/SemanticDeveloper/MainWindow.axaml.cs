@@ -57,23 +57,47 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         var title = $"Session {++_sessionCounter}";
         var view = new SessionView();
+        SessionTab? tab = null;
+
+        EventHandler closeHandler = null!;
+        closeHandler = async (_, _) =>
+        {
+            if (tab is not null)
+                await CloseSessionAsync(tab);
+        };
+        view.SessionClosedRequested += closeHandler;
+
         if (applySharedSettings)
         {
             view.ApplySettingsSnapshot(_sharedSettings);
         }
-        var tab = new SessionTab(title, view);
-        view.PropertyChanged += (_, args) =>
+
+        tab = new SessionTab(title, view)
+        {
+            CloseRequestedHandler = closeHandler
+        };
+
+        PropertyChangedEventHandler viewHandler = null!;
+        viewHandler = (_, args) =>
         {
             if (args.PropertyName == nameof(SessionView.SessionStatus))
             {
-                tab.UpdateHeader();
+                tab!.UpdateHeader();
             }
         };
-        tab.PropertyChanged += (_, args) =>
+
+        view.PropertyChanged += viewHandler;
+        tab.ViewPropertyChangedHandler = viewHandler;
+
+        PropertyChangedEventHandler tabHandler = null!;
+        tabHandler = (_, args) =>
         {
             if (args.PropertyName == nameof(SessionTab.Header) && ReferenceEquals(SelectedSession, tab))
                 OnPropertyChanged(nameof(SelectedSessionTitle));
         };
+        tab.PropertyChanged += tabHandler;
+        tab.TabPropertyChangedHandler = tabHandler;
+
         tab.UpdateHeader();
         _sessions.Add(tab);
         SelectedSession = tab;
@@ -174,6 +198,64 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    private async Task CloseSessionAsync(SessionTab tab)
+    {
+        if (!_sessions.Contains(tab))
+            return;
+
+        try
+        {
+            await tab.View.ShutdownAsync();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Failed to shut down session: {ex.Message}");
+        }
+        finally
+        {
+            tab.View.ForceStop();
+        }
+
+        if (tab.CloseRequestedHandler is not null)
+            tab.View.SessionClosedRequested -= tab.CloseRequestedHandler;
+        if (tab.ViewPropertyChangedHandler is not null)
+            tab.View.PropertyChanged -= tab.ViewPropertyChangedHandler;
+        if (tab.TabPropertyChangedHandler is not null)
+            tab.PropertyChanged -= tab.TabPropertyChangedHandler;
+
+        _sessions.Remove(tab);
+        if (ReferenceEquals(SelectedSession, tab))
+            SelectedSession = _sessions.Count > 0 ? _sessions[^1] : null;
+    }
+
+    private async Task PromptRenameSession(SessionTab tab)
+    {
+        var dialog = new InputDialog
+        {
+            Title = "Rename Session",
+            Prompt = "Session name:",
+            Input = tab.DisplayName
+        };
+        var result = await dialog.ShowDialog<InputDialogResult?>(this);
+        var text = result?.Text?.Trim();
+        if (!string.IsNullOrWhiteSpace(text))
+            tab.DisplayName = text;
+    }
+
+    private async void OnRenameTabClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menu || menu.CommandParameter is not SessionTab tab)
+            return;
+        await PromptRenameSession(tab);
+    }
+
+    private async void OnCloseTabClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menu || menu.CommandParameter is not SessionTab tab)
+            return;
+        await CloseSessionAsync(tab);
+    }
+
     private static AppSettings CloneAppSettings(AppSettings source) => new()
     {
         Command = source.Command,
@@ -190,17 +272,35 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public class SessionTab : INotifyPropertyChanged
     {
+        private string _displayName;
+        private string _header = string.Empty;
+
         public SessionTab(string title, SessionView view)
         {
             Title = title;
             View = view;
-            _header = $"{Title} - {view.SessionStatus}";
+            _displayName = title;
+            UpdateHeader();
         }
 
         public string Title { get; }
         public SessionView View { get; }
+        public EventHandler? CloseRequestedHandler { get; set; }
+        public PropertyChangedEventHandler? ViewPropertyChangedHandler { get; set; }
+        public PropertyChangedEventHandler? TabPropertyChangedHandler { get; set; }
 
-        private string _header;
+        public string DisplayName
+        {
+            get => _displayName;
+            set
+            {
+                if (_displayName == value) return;
+                _displayName = value;
+                UpdateHeader();
+                OnPropertyChanged();
+            }
+        }
+
         public string Header
         {
             get => _header;
@@ -214,11 +314,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         public void UpdateHeader()
         {
-        Header = $"{Title} - {View.SessionStatus}";
-    }
+            Header = $"{DisplayName} - {View.SessionStatus}";
+        }
 
-    public event PropertyChangedEventHandler? PropertyChanged;
-    private void OnPropertyChanged([CallerMemberName] string? name = null)
-        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-}
+        public event PropertyChangedEventHandler? PropertyChanged;
+        private void OnPropertyChanged([CallerMemberName] string? name = null)
+            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    }
 }
