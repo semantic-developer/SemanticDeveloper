@@ -1,5 +1,7 @@
+using System;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
 
 namespace SemanticDeveloper.Views;
 
@@ -32,6 +34,16 @@ public partial class InputDialog : Window
     {
         get => CreatePrCheckBox.IsChecked ?? false;
         set => CreatePrCheckBox.IsChecked = value;
+    }
+
+    protected override void OnOpened(EventArgs e)
+    {
+        base.OnOpened(e);
+        Dispatcher.UIThread.Post(() =>
+        {
+            InputText.Focus();
+            InputText.CaretIndex = InputText.Text?.Length ?? 0;
+        }, DispatcherPriority.Input);
     }
 
     private void OnOk(object? sender, RoutedEventArgs e)

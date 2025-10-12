@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Globalization;
@@ -1429,7 +1430,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 var item = new MenuItem
                 {
                     Header = prompt.Display,
-                    Tag = prompt.Command
+                    Tag = prompt
                 };
                 item.Click += OnPromptMenuItemClick;
                 flyout.Items.Add(item);
@@ -1445,7 +1446,8 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
     private async void OnPromptMenuItemClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (sender is not MenuItem menu) return;
-        var command = menu.Tag as string;
+        if (menu.Tag is not PromptEntry entry) return;
+        var command = entry.Command;
         if (string.IsNullOrWhiteSpace(command)) return;
         if (!_cli.IsRunning)
         {
@@ -1454,14 +1456,63 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         }
 
         var label = menu.Header?.ToString() ?? command;
+        var placeholderNumbers = Array.Empty<int>();
+
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(entry.FilePath) && File.Exists(entry.FilePath))
+            {
+                placeholderNumbers = Regex.Matches(File.ReadAllText(entry.FilePath), @"\$(\d+)")
+                    .Select(match => match.Groups[1].Value)
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Select(value => int.Parse(value, CultureInfo.InvariantCulture))
+                    .Distinct()
+                    .OrderBy(value => value)
+                    .ToArray();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendCliLog("System: Failed to inspect prompt arguments: " + ex.Message);
+            placeholderNumbers = Array.Empty<int>();
+        }
+
+        var argsInput = string.Empty;
+        if (placeholderNumbers.Length > 0)
+        {
+            var window = GetHostWindow();
+            if (window is null)
+            {
+                AppendCliLog("System: Unable to collect prompt arguments (window unavailable).");
+                return;
+            }
+
+            var placeholdersText = string.Join(", ", placeholderNumbers.Select(n => $"${n}"));
+            var inputDialog = new InputDialog
+            {
+                Title = "Prompt Arguments",
+                Prompt = $"Enter values for {placeholdersText} (space-separated; use quotes for spaces)."
+            };
+            inputDialog.ShowCreatePullRequestOption = false;
+
+            var result = await inputDialog.ShowDialog<InputDialogResult?>(window);
+            if (result is null)
+            {
+                return;
+            }
+
+            argsInput = result.Text?.Trim() ?? string.Empty;
+        }
+
+        var fullCommand = string.IsNullOrWhiteSpace(argsInput) ? command : $"{command} {argsInput}";
         AppendCliLog($"System: Sending prompt '{label}'.");
-        CliInput = command;
+        CliInput = fullCommand;
         await SendCliInputAsync();
     }
 
-    private List<(string Display, string Command)> LoadPromptEntries(out string directory)
+    private List<PromptEntry> LoadPromptEntries(out string directory)
     {
-        var results = new List<(string, string)>();
+        var results = new List<PromptEntry>();
         directory = Services.CodexConfigService.GetPromptsDirectory();
         try
         {
@@ -1475,12 +1526,14 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 if (string.IsNullOrWhiteSpace(name)) continue;
                 var display = name.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ? name[..^3] : name;
                 var command = "/" + name;
-                results.Add((display, command));
+                results.Add(new PromptEntry(display, command, file));
             }
         }
         catch { }
         return results;
     }
+
+    private sealed record PromptEntry(string Display, string Command, string FilePath);
 
     private async void OnDeleteTreeItemClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
