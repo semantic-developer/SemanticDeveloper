@@ -16,6 +16,16 @@ public static class CodexVersionService
     {
         try
         {
+            if (WslInterop.IsEnabled)
+            {
+                var wslPath = WslInterop.TryConvertToWindowsPath("~/.codex/version.json");
+                if (!string.IsNullOrWhiteSpace(wslPath))
+                {
+                    Console.WriteLine($"[CodexVersion] Using WSL version path {wslPath}.");
+                    return wslPath;
+                }
+            }
+
             var home = Environment.GetEnvironmentVariable("CODEX_HOME");
             string dir;
             if (!string.IsNullOrWhiteSpace(home)) dir = home!;
@@ -32,9 +42,32 @@ public static class CodexVersionService
     {
         try
         {
-            var path = GetVersionFilePath();
-            if (!File.Exists(path)) return (false, null, "version.json not found");
-            var text = File.ReadAllText(path);
+            string? text = null;
+            if (WslInterop.IsEnabled)
+            {
+                text = WslInterop.ReadFile("~/.codex/version.json");
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    var wslPath = WslInterop.TryConvertToWindowsPath("~/.codex/version.json");
+                    if (!string.IsNullOrWhiteSpace(wslPath) && File.Exists(wslPath))
+                    {
+                        Console.WriteLine($"[CodexVersion] Using converted WSL version path {wslPath}.");
+                        text = File.ReadAllText(wslPath);
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    Console.WriteLine("[CodexVersion] Version file not found in WSL.");
+                    return (false, null, "version.json not found");
+                }
+            }
+            else
+            {
+                var path = GetVersionFilePath();
+                if (!File.Exists(path)) return (false, null, "version.json not found");
+                Console.WriteLine($"[CodexVersion] Reading version file {path}.");
+                text = File.ReadAllText(path);
+            }
             if (string.IsNullOrWhiteSpace(text)) return (false, null, "version.json empty");
             var obj = JObject.Parse(text);
             var version = obj["latest_version"]?.ToString();
@@ -51,6 +84,15 @@ public static class CodexVersionService
     {
         try
         {
+            if (WslInterop.IsEnabled)
+            {
+                var baseCommand = string.IsNullOrWhiteSpace(command) ? "codex" : command;
+                var shellCommand = $"{EscapeForShell(baseCommand)} --version";
+                var psiWsl = WslInterop.CreateShellCommand(shellCommand);
+                Console.WriteLine($"[CodexVersion] Running '{shellCommand}' via WSL.");
+                return await TryGetInstalledVersionAsync(psiWsl);
+            }
+
             if (string.IsNullOrWhiteSpace(command)) return (false, null, "Codex command not configured");
 
             var psi = new ProcessStartInfo
@@ -63,6 +105,7 @@ public static class CodexVersionService
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            Console.WriteLine($"[CodexVersion] Running '{command} --version' in {psi.WorkingDirectory}.");
 
             return await TryGetInstalledVersionAsync(psi);
         }
@@ -145,4 +188,14 @@ public static class CodexVersionService
             })
             .ToArray();
     }
+
+    private static string EscapeForShell(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+        if (value.IndexOf(' ') < 0 && value.IndexOf('\'') < 0 && value.IndexOf('"') < 0)
+            return value;
+        return "'" + value.Replace("'", "'\"'\"'") + "'";
+    }
+
 }

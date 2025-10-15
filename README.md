@@ -21,6 +21,40 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI app se
   - Verify with: `codex app-server --help`
 - No external Git required — uses LibGit2Sharp for repo init/staging/commit
 
+## Platform Setup & CLI Modes
+
+Semantic Developer can drive the Codex CLI from Linux, macOS, or Windows. On Windows you can choose to run Codex natively or through WSL; toggle this at runtime in **CLI Settings → Use WSL**.
+
+### Linux
+
+- Install the .NET 8 SDK and the Codex CLI in your Linux environment.
+- Profiles live under `~/.codex/config.toml`; prompts under `~/.codex/prompts/`.
+- MCP config file: `~/.config/SemanticDeveloper/mcp_servers.json`.
+- Leave **Use WSL** off (Linux builds interact with the native tooling directly).
+
+### macOS
+
+- Install .NET 8 (e.g., `brew install dotnet-sdk`) and the Codex CLI (`brew install codex` or the official installer).
+- Profiles/prompts: `~/.codex/config.toml` and `~/.codex/prompts/`.
+- MCP config file: `~/Library/Application Support/SemanticDeveloper/mcp_servers.json`.
+- Keep **Use WSL** off; the CLI launches natively on macOS.
+
+### Windows (native CLI)
+
+- Install the Windows .NET 8 SDK and Codex CLI for Windows, ensuring `codex.exe` is on your Windows `PATH`.
+- Profiles/prompts default to `%USERPROFILE%\.codex\config.toml` and `%USERPROFILE%\.codex\prompts\` (respect `CODEX_HOME` if set).
+- MCP config file: `%AppData%\SemanticDeveloper\mcp_servers.json`.
+- Leave **Use WSL** unchecked—MCP commands and the Codex process execute as Windows binaries, so use Windows paths in `mcp_servers.json`.
+
+### Windows (Codex inside WSL)
+
+- Install the Codex CLI inside your WSL distribution along with any MCP servers you want to run (for example `pip install`, `npm install`, etc.).
+- In **CLI Settings** enable **Use WSL**. When checked:
+  - The Codex CLI and MCP servers launch through `wsl.exe`, so command paths in `mcp_servers.json` should be Linux paths (for example `~/.local/bin/mcp-atlassian`).
+  - Profiles/prompts remain in the WSL home (`~/.codex/config.toml`, `~/.codex/prompts/`). The app bridges to them automatically.
+  - The MCP configuration file stays on the Windows side (`%AppData%\SemanticDeveloper\mcp_servers.json`); only the command execution happens in WSL.
+- Leave **Use WSL** on only when the Codex CLI is installed in WSL. Disable it if you want to run the Windows binaries instead.
+
 ## Build & Run
 
 - Restore/build:
@@ -40,7 +74,11 @@ A cross‑platform desktop UI (Avalonia/.NET 8) for driving the Codex CLI app se
      - `config.toml` path: `$CODEX_HOME/config.toml` (defaults to `~/.codex/config.toml`)
    - Verbose logging (show suppressed output)
    - Enable MCP support (loads MCP servers from your JSON config and passes them directly to Codex)
-     - Config path: `~/.config/SemanticDeveloper/mcp_servers.json` (Linux/macOS) or `%AppData%/SemanticDeveloper/mcp_servers.json` (Windows)
+     - MCP config locations:
+       - Linux: `~/.config/SemanticDeveloper/mcp_servers.json`
+       - macOS: `~/Library/Application Support/SemanticDeveloper/mcp_servers.json`
+       - Windows: `%AppData%\SemanticDeveloper\mcp_servers.json`
+     - When **Use WSL** is enabled, keep the config file in the Windows location above but supply Linux paths in the `command`/`cwd` fields—the app relays each server through WSL.
 - Use API Key for Codex CLI (pipes the key to `codex login --with-api-key` before sessions; does not rely on existing CLI auth)
   - Allow network access for tools (sets sandbox_policy.network_access=true on turns so MCP tools can reach the network)
   - Without API key enabled, the app proactively authenticates with `codex auth login` (falling back to `codex login`) before sessions so your chat/GPT token is used.

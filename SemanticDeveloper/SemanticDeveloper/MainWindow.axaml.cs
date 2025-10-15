@@ -27,6 +27,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         DataContext = this;
 
         _sharedSettings = CloneAppSettings(SettingsService.Load());
+        var useWsl = OperatingSystem.IsWindows() && _sharedSettings.UseWsl;
+        Services.CodexConfigService.SetUseWsl(useWsl);
         AddSession(applySharedSettings: true);
     }
 
@@ -167,7 +169,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var info = new InfoDialog
             {
                 Title = "Add a Codex Profile",
-                Message = "No Codex CLI profiles were found in ~/.codex/config.toml.\n\nCreate a profile under [profiles.<name>] with the model you want to use, for example:\n\n[profiles.default]\nmodel = \"gpt-5-codex\"\nmodel_provider = \"openai\"\n\nAfter you add a profile, select it in CLI Settings so sessions know which model to run."
+                Message = BuildNoProfileMessage()
             };
 
             await info.ShowDialog(this);
@@ -196,6 +198,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 continue;
             other.View.ApplySettingsSnapshot(_sharedSettings);
         }
+    }
+
+    private static string BuildNoProfileMessage()
+    {
+        var baseMessage = "No Codex CLI profiles were found in ~/.codex/config.toml.\n\nCreate a profile under [profiles.<name>] with the model you want to use, for example:\n\n[profiles.default]\nmodel = \"gpt-5-codex\"\nmodel_provider = \"openai\"\n\napproval_policy = \"never\"\nmodel_reasoning_effort = \"high\"\nmodel_reasoning_summary = \"auto\"\n\nAfter you add a profile, select it in CLI Settings so sessions know which model to run.";
+
+        var source = CodexConfigService.LastProfileSource;
+        var error = CodexConfigService.LastProfileError;
+        if (string.IsNullOrWhiteSpace(source) && string.IsNullOrWhiteSpace(error))
+            return baseMessage;
+
+        var diagnostics = "\n\nDiagnostics:\n" + (string.IsNullOrWhiteSpace(source) ? " • Source: (unknown)" : $" • Source: {source}");
+        if (!string.IsNullOrWhiteSpace(error))
+            diagnostics += $"\n • Error: {error}";
+        return baseMessage + diagnostics;
     }
 
     private async Task CloseSessionAsync(SessionTab tab)
@@ -320,5 +337,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         public event PropertyChangedEventHandler? PropertyChanged;
         private void OnPropertyChanged([CallerMemberName] string? name = null)
             => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    }
+
+    internal void RequestProfileCheck()
+    {
+        _profileCheckPerformed = false;
+        Dispatcher.UIThread.Post(async () => await EnsureProfilesConfiguredAsync());
     }
 }
