@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 using System.IO;
+using System.Text;
 
 namespace SemanticDeveloper.Services;
 
@@ -126,29 +127,62 @@ public class CodexCliService
             CreateNoWindow = true
         };
 
-        if (UseWsl && OperatingSystem.IsWindows())
-        {
-            var wslDir = await TranslatePathToWslAsync(effectiveDir);
-            psi.FileName = "wsl";
-            if (!string.IsNullOrWhiteSpace(wslDir))
-            {
-                psi.ArgumentList.Add("--cd");
-                psi.ArgumentList.Add(wslDir);
-            }
-            psi.ArgumentList.Add("--exec");
-            psi.ArgumentList.Add(Command);
-        }
-        else
-        {
-            psi.FileName = Command;
-        }
+        var normalizedCommand = NormalizeToken(Command);
+        if (string.IsNullOrWhiteSpace(normalizedCommand))
+            normalizedCommand = Command;
+        if (!string.IsNullOrWhiteSpace(normalizedCommand))
+            normalizedCommand = Environment.ExpandEnvironmentVariables(normalizedCommand);
 
+        var normalizedArgs = new List<string>();
         foreach (var arg in commandArgs ?? Array.Empty<string>())
         {
             if (string.IsNullOrWhiteSpace(arg)) continue;
             var normalized = NormalizeToken(arg);
             if (string.IsNullOrWhiteSpace(normalized)) continue;
-            psi.ArgumentList.Add(normalized);
+            normalizedArgs.Add(normalized);
+        }
+
+        if (UseWsl && OperatingSystem.IsWindows())
+        {
+            var wslDir = await TranslatePathToWslAsync(effectiveDir);
+            var wslExe = WslInterop.GetWslExecutable();
+            if (string.IsNullOrWhiteSpace(wslExe) || !WslInterop.IsEnabled)
+                throw new InvalidOperationException("WSL is enabled in settings but wsl.exe could not be located.");
+
+            psi.FileName = wslExe;
+            var distribution = WslInterop.SelectedDistribution;
+            if (!string.IsNullOrWhiteSpace(distribution))
+            {
+                psi.ArgumentList.Add("-d");
+                psi.ArgumentList.Add(distribution!);
+            }
+            if (!string.IsNullOrWhiteSpace(wslDir))
+            {
+                psi.ArgumentList.Add("--cd");
+                psi.ArgumentList.Add(wslDir);
+            }
+            psi.ArgumentList.Add("--");
+            psi.ArgumentList.Add("/bin/bash");
+            psi.ArgumentList.Add("-lc");
+            psi.ArgumentList.Add(BuildBashCommand(normalizedCommand, normalizedArgs));
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            var resolved = ResolveWindowsCommand(normalizedCommand, normalizedArgs);
+            psi.FileName = resolved.FileName;
+            foreach (var arg in resolved.Arguments)
+            {
+                if (!string.IsNullOrWhiteSpace(arg))
+                    psi.ArgumentList.Add(arg);
+            }
+        }
+        else
+        {
+            psi.FileName = string.IsNullOrWhiteSpace(normalizedCommand) ? Command : normalizedCommand;
+            foreach (var normalized in normalizedArgs)
+            {
+                psi.ArgumentList.Add(normalized);
+            }
         }
 
         return psi;
@@ -161,14 +195,7 @@ public class CodexCliService
 
         try
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "wsl",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
+            var psi = WslInterop.CreateBaseProcessStartInfo(includeDistribution: true);
             psi.ArgumentList.Add("wslpath");
             psi.ArgumentList.Add("-a");
             psi.ArgumentList.Add(path);
@@ -226,6 +253,155 @@ public class CodexCliService
             tokens.AddRange(SplitArgsRespectingQuotes(additional!));
         }
         return tokens;
+    }
+
+    private static string BuildBashCommand(string command, IReadOnlyList<string> args)
+    {
+        var effectiveCommand = string.IsNullOrWhiteSpace(command) ? "codex" : command;
+        var sb = new StringBuilder();
+        sb.Append("exec ").Append(QuoteForBash(effectiveCommand));
+        if (args != null)
+        {
+            foreach (var arg in args)
+            {
+                if (string.IsNullOrWhiteSpace(arg)) continue;
+                sb.Append(' ').Append(QuoteForBash(arg));
+            }
+        }
+        return sb.ToString();
+    }
+
+    private static string QuoteForBash(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return "''";
+        return "'" + value.Replace("'", "'\"'\"'") + "'";
+    }
+
+    private static (string FileName, List<string> Arguments) ResolveWindowsCommand(string command, IReadOnlyList<string> args)
+    {
+        var argumentList = new List<string>();
+        var commandPath = string.IsNullOrWhiteSpace(command) ? "codex" : command;
+
+        try
+        {
+            if (Path.IsPathRooted(commandPath))
+            {
+                var resolved = commandPath;
+                if (!File.Exists(resolved))
+                {
+                    var fallback = TryGetWindowsCommandWithExtensions(resolved);
+                    if (!string.IsNullOrEmpty(fallback))
+                        commandPath = fallback;
+                }
+                else if (string.IsNullOrEmpty(Path.GetExtension(resolved)))
+                {
+                    var fallback = TryGetWindowsCommandWithExtensions(resolved);
+                    if (!string.IsNullOrEmpty(fallback))
+                        commandPath = fallback;
+                }
+            }
+        }
+        catch { }
+
+        var ext = Path.GetExtension(commandPath);
+        if (string.Equals(ext, ".cmd", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(ext, ".bat", StringComparison.OrdinalIgnoreCase))
+        {
+            var comSpec = Environment.GetEnvironmentVariable("ComSpec");
+            if (string.IsNullOrWhiteSpace(comSpec))
+                comSpec = "cmd.exe";
+            argumentList.Add("/C");
+            argumentList.Add(BuildCmdCommand(commandPath, args));
+            return (comSpec, argumentList);
+        }
+
+        if (string.Equals(ext, ".ps1", StringComparison.OrdinalIgnoreCase))
+        {
+            var powershell = GetPowershellExecutable();
+            argumentList.Add("-NoProfile");
+            argumentList.Add("-ExecutionPolicy");
+            argumentList.Add("Bypass");
+            argumentList.Add("-File");
+            argumentList.Add(commandPath);
+            if (args is { Count: > 0 })
+            {
+                foreach (var arg in args)
+                {
+                    if (!string.IsNullOrWhiteSpace(arg))
+                        argumentList.Add(arg);
+                }
+            }
+            return (powershell, argumentList);
+        }
+
+        if (args is { Count: > 0 })
+        {
+            foreach (var arg in args)
+            {
+                if (!string.IsNullOrWhiteSpace(arg))
+                    argumentList.Add(arg);
+            }
+        }
+        return (commandPath, argumentList);
+    }
+
+    private static string BuildCmdCommand(string commandPath, IReadOnlyList<string> args)
+    {
+        var sb = new StringBuilder();
+        sb.Append(QuoteForCmd(commandPath));
+        if (args is { Count: > 0 })
+        {
+            foreach (var arg in args)
+            {
+                if (string.IsNullOrWhiteSpace(arg)) continue;
+                sb.Append(' ').Append(QuoteForCmd(arg));
+            }
+        }
+        return sb.ToString();
+    }
+
+    private static string QuoteForCmd(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return "\"\"";
+        var needsQuotes = value.IndexOfAny(new[] { ' ', '\t', '"' }) >= 0;
+        var escaped = value.Replace("\"", "\"\"");
+        return needsQuotes ? $"\"{escaped}\"" : escaped;
+    }
+
+    private static string GetPowershellExecutable()
+    {
+        try
+        {
+            var systemDir = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            if (!string.IsNullOrEmpty(systemDir))
+            {
+                var legacy = Path.Combine(systemDir, "WindowsPowerShell", "v1.0", "powershell.exe");
+                if (File.Exists(legacy))
+                    return legacy;
+            }
+        }
+        catch { }
+        return "powershell.exe";
+    }
+
+    private static string? TryGetWindowsCommandWithExtensions(string basePath)
+    {
+        if (string.IsNullOrWhiteSpace(basePath))
+            return null;
+        var candidates = new[] { ".cmd", ".bat", ".exe", ".ps1" };
+        foreach (var ext in candidates)
+        {
+            try
+            {
+                var candidate = basePath + ext;
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+            catch { }
+        }
+        return null;
     }
 
     private static string RenderCommandForDisplay(string fileName, IEnumerable<string> args, string workingDir)

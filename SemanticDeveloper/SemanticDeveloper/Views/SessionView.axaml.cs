@@ -28,6 +28,7 @@ using TextMateSharp.Grammars;
 using TextMateSharp.Registry;
 using SemanticDeveloper.Models;
 using SemanticDeveloper.Services;
+using SemanticDeveloper;
 using AvaloniaEdit; 
 using System.Collections.Concurrent;
 using Newtonsoft.Json;
@@ -40,6 +41,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
     public event EventHandler? SessionClosedRequested;
 
     private readonly CodexCliService _cli = new();
+    private bool IsWslMode => OperatingSystem.IsWindows() && _cli.UseWsl && WslInterop.IsEnabled;
     private string? _currentModel;
     // Auto-approval UI removed; approvals require manual handling
     private AppSettings _settings = new();
@@ -213,10 +215,14 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
     {
         _settings = CloneSettings(settings);
 
+        var previousUseWsl = _cli.UseWsl;
+        var useWsl = OperatingSystem.IsWindows() && _settings.UseWsl;
+
         _cli.Command = _settings.Command;
         _cli.UseApiKey = _settings.UseApiKey;
         _cli.ApiKey = string.IsNullOrWhiteSpace(_settings.ApiKey) ? null : _settings.ApiKey;
-        _cli.UseWsl = OperatingSystem.IsWindows() && _settings.UseWsl;
+        _cli.UseWsl = useWsl;
+        Services.CodexConfigService.SetUseWsl(useWsl);
 
         SelectedProfile = _settings.SelectedProfile;
         _currentModel = TryExtractModelFromArgs(_cli.AdditionalArgs);
@@ -229,20 +235,31 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         if (!string.IsNullOrWhiteSpace(logPrefix))
         {
             var profileSuffix = string.IsNullOrWhiteSpace(_settings.SelectedProfile) ? string.Empty : " • profile=" + _settings.SelectedProfile;
-            var wslSuffix = _cli.UseWsl ? " • WSL" : string.Empty;
-            AppendCliLog($"{logPrefix}'{_cli.Command}'{profileSuffix}{wslSuffix}{(logSuffix ?? string.Empty)}");
+        var wslSuffix = _cli.UseWsl ? " • WSL" : string.Empty;
+        AppendCliLog($"{logPrefix}'{_cli.Command}'{profileSuffix}{wslSuffix}{(logSuffix ?? string.Empty)}");
+        if (_cli.UseWsl && !WslInterop.IsEnabled)
+        {
+            AppendCliLog("System: WSL requested but wsl.exe is unavailable; falling back to Windows paths.");
+        }
         }
 
         if (persist)
         {
             SettingsService.Save(_settings);
         }
+
+        if (useWsl != previousUseWsl)
+        {
+            if (GetHostWindow() is MainWindow host)
+                host.RequestProfileCheck();
+        }
+
     }
 
     public void ApplySettingsSnapshot(AppSettings settings, bool logChange = false)
     {
         var prefix = logChange ? "System: CLI settings updated: " : null;
-        var suffix = logChange ? " (--proto enabled)" : null;
+        var suffix = logChange ? " (--app-server enabled)" : null;
         ApplyAppSettingsInternal(settings, persist: false, logPrefix: prefix, logSuffix: suffix);
     }
 
@@ -2741,7 +2758,10 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
 
             var result = new JObject();
             var mcpServersObj = new JObject();
+            var serversArray = new JArray();
             result["mcp_servers"] = mcpServersObj;
+            result["mcpServers"] = mcpServersObj;
+            result["servers"] = serversArray;
 
             void AddServer(string rawName, JObject definition)
             {
@@ -2765,9 +2785,24 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 var serverObj = new JObject();
                 var def = new McpServerDefinition { Name = name };
 
+                var hasStartupTimeout = false;
+
                 if (!string.IsNullOrWhiteSpace(commandText))
                 {
                     commandText = commandText.Trim();
+                    commandText = ExpandEnvironmentVariablesSafe(commandText);
+                    if (OperatingSystem.IsWindows() && !IsWslMode)
+                    {
+                        var resolved = TryResolveWindowsExecutable(commandText);
+                        if (string.IsNullOrWhiteSpace(resolved))
+                        {
+                            AppendCliLog($"System: MCP '{name}' skipped — command '{commandText}' not found on Windows PATH.");
+                            return;
+                        }
+                        if (!string.Equals(resolved, commandText, StringComparison.OrdinalIgnoreCase) && _verboseLogging)
+                            AppendCliLog($"System: MCP '{name}' command resolved to {resolved}.");
+                        commandText = resolved;
+                    }
                     serverObj["command"] = commandText;
                     def.Command = commandText;
 
@@ -2814,21 +2849,32 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                     }
                 }
 
-                var startupSecToken = definition["startup_timeout_sec"];
+                var startupSecToken = definition["startup_timeout_sec"] ?? definition["startup_timeout"];
                 if (startupSecToken != null && double.TryParse(startupSecToken.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var startupSec))
                 {
                     serverObj["startup_timeout_sec"] = startupSec;
+                    serverObj["startup_timeout"] = startupSec;
                     def.StartupTimeoutSec = startupSec;
+                    hasStartupTimeout = true;
                 }
 
-                var startupMsToken = definition["startup_timeout_ms"];
+                var startupMsToken = definition["startup_timeout_ms"] ?? definition["startup_timeout_milliseconds"];
                 if (startupMsToken != null && long.TryParse(startupMsToken.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var startupMs))
+                {
                     serverObj["startup_timeout_ms"] = startupMs;
+                    serverObj["startup_timeout_milliseconds"] = startupMs;
+                    if (!hasStartupTimeout && startupMs > 0)
+                    {
+                        def.StartupTimeoutSec = startupMs / 1000.0;
+                        hasStartupTimeout = true;
+                    }
+                }
 
                 var toolTimeoutToken = definition["tool_timeout_sec"];
                 if (toolTimeoutToken != null && double.TryParse(toolTimeoutToken.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var toolTimeout))
                 {
                     serverObj["tool_timeout_sec"] = toolTimeout;
+                    serverObj["tool_timeout"] = toolTimeout;
                     def.ToolTimeoutSec = toolTimeout;
                 }
 
@@ -2847,7 +2893,37 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 if (!serverObj.HasValues)
                     return;
 
+                if (!hasStartupTimeout && string.IsNullOrWhiteSpace(def.Url))
+                {
+                    var defaultTimeoutSec = OperatingSystem.IsWindows() ? 20.0 : 15.0;
+                    var defaultTimeoutMs = (long)(defaultTimeoutSec * 1000);
+                    serverObj["startup_timeout_sec"] = defaultTimeoutSec;
+                    serverObj["startup_timeout"] = defaultTimeoutSec;
+                    serverObj["startup_timeout_ms"] = defaultTimeoutMs;
+                    serverObj["startup_timeout_milliseconds"] = defaultTimeoutMs;
+                    def.StartupTimeoutSec = defaultTimeoutSec;
+                }
+
                 mcpServersObj[name] = serverObj;
+                serversArray.Add(new JObject
+                {
+                    ["name"] = name,
+                    ["command"] = serverObj["command"],
+                    ["args"] = serverObj["args"],
+                    ["cwd"] = serverObj["cwd"],
+                    ["env"] = serverObj["env"],
+                    ["url"] = serverObj["url"],
+                    ["bearer_token"] = serverObj["bearer_token"],
+                    ["startup_timeout"] = serverObj["startup_timeout"],
+                    ["startup_timeout_sec"] = serverObj["startup_timeout_sec"],
+                    ["startup_timeout_ms"] = serverObj["startup_timeout_ms"],
+                    ["startup_timeout_milliseconds"] = serverObj["startup_timeout_milliseconds"],
+                    ["tool_timeout_sec"] = serverObj["tool_timeout_sec"],
+                    ["tool_timeout"] = serverObj["tool_timeout"],
+                    ["tool_timeout_ms"] = serverObj["tool_timeout_ms"],
+                    ["tool_timeout_milliseconds"] = serverObj["tool_timeout_milliseconds"],
+                    ["enabled"] = true
+                });
                 _configuredMcpServers.Add(def);
                 included.Add(name);
             }
@@ -2877,13 +2953,22 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                     result["experimental_use_rmcp_client"] = rmcp;
             }
 
-            if (!included.Any())
+            if (included.Count == 0)
             {
                 _configuredMcpServers.Clear();
                 return null;
             }
 
             serverNames = included.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+            if (_verboseLogging)
+            {
+                try
+                {
+                    var preview = result.ToString(Newtonsoft.Json.Formatting.None);
+                    AppendCliLog($"System: MCP config override prepared: {preview}");
+                }
+                catch { }
+            }
             return result;
         }
         catch
@@ -2997,28 +3082,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         if (string.IsNullOrWhiteSpace(server.Command))
             return tools;
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = server.Command,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        if (!string.IsNullOrWhiteSpace(server.Cwd))
-        {
-            try { psi.WorkingDirectory = server.Cwd; } catch { }
-        }
-
-        foreach (var arg in server.Args)
-            psi.ArgumentList.Add(arg);
-
-        foreach (var kvp in server.Env)
-        {
-            try { psi.Environment[kvp.Key] = kvp.Value; } catch { }
-        }
+        var psi = CreateMcpProcessStartInfo(server);
 
         using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
         if (!process.Start())
@@ -3174,6 +3238,82 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         return tools;
     }
 
+    private ProcessStartInfo CreateMcpProcessStartInfo(McpServerDefinition server)
+    {
+        if (IsWslMode)
+        {
+            var shellCommand = BuildWslMcpCommand(server);
+            var psi = WslInterop.CreateShellCommand(shellCommand);
+            psi.RedirectStandardInput = true;
+            return psi;
+        }
+
+        var psiWin = new ProcessStartInfo
+        {
+            FileName = server.Command ?? string.Empty,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        if (!string.IsNullOrWhiteSpace(server.Cwd))
+        {
+            try { psiWin.WorkingDirectory = server.Cwd; } catch { }
+        }
+
+        foreach (var arg in server.Args)
+            psiWin.ArgumentList.Add(arg);
+
+        foreach (var kvp in server.Env)
+        {
+            if (string.IsNullOrWhiteSpace(kvp.Key))
+                continue;
+            try { psiWin.Environment[kvp.Key] = kvp.Value; } catch { }
+        }
+
+        return psiWin;
+    }
+
+    private static string BuildWslMcpCommand(McpServerDefinition server)
+    {
+        var segments = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(server.Cwd))
+        {
+            segments.Add($"cd {QuoteForBash(server.Cwd)}");
+        }
+
+        foreach (var kvp in server.Env)
+        {
+            if (string.IsNullOrWhiteSpace(kvp.Key))
+                continue;
+            segments.Add($"export {kvp.Key}={QuoteForBash(kvp.Value)}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(server.Command))
+        {
+            var builder = new StringBuilder();
+            builder.Append(QuoteForBash(server.Command));
+            foreach (var arg in server.Args)
+            {
+                builder.Append(' ').Append(QuoteForBash(arg));
+            }
+            segments.Add(builder.ToString());
+        }
+
+        var command = string.Join(" && ", segments.Where(s => !string.IsNullOrWhiteSpace(s)));
+        return string.IsNullOrWhiteSpace(command) ? "true" : command;
+    }
+
+    private static string QuoteForBash(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return "''";
+        return "'" + value.Replace("'", "'\"'\"'") + "'";
+    }
+
     private static async Task SendJsonAsync(TextWriter writer, JObject payload, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -3309,6 +3449,79 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 clone.Env[kvp.Key] = kvp.Value;
             return clone;
         }
+    }
+
+    private static string ExpandEnvironmentVariablesSafe(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return value;
+        try { return Environment.ExpandEnvironmentVariables(value); }
+        catch { return value; }
+    }
+
+    private static string? TryResolveWindowsExecutable(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+            return null;
+
+        string Expand(string value)
+        {
+            try { return Environment.ExpandEnvironmentVariables(value); }
+            catch { return value; }
+        }
+
+        static bool Exists(string path) => !string.IsNullOrWhiteSpace(path) && File.Exists(path);
+
+        string? TryWithExtensions(string basePath)
+        {
+            if (Exists(basePath))
+                return Path.GetFullPath(basePath);
+
+            var hasExt = !string.IsNullOrWhiteSpace(Path.GetExtension(basePath));
+            if (hasExt)
+                return null;
+
+            var pathext = Environment.GetEnvironmentVariable("PATHEXT") ?? ".EXE;.CMD;.BAT;.COM";
+            foreach (var ext in pathext.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var candidate = basePath + ext;
+                if (Exists(candidate))
+                    return Path.GetFullPath(candidate);
+            }
+
+            return null;
+        }
+
+        bool containsPathChars = command.Contains('\\') || command.Contains('/') || command.Contains(':');
+        if (containsPathChars)
+        {
+            var expanded = Expand(command);
+            var resolved = TryWithExtensions(expanded);
+            if (resolved != null)
+                return resolved;
+        }
+        else
+        {
+            var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+            foreach (var dir in path.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                try
+                {
+                    if (string.IsNullOrWhiteSpace(dir))
+                        continue;
+                    var candidate = Path.Combine(dir, command);
+                    var resolved = TryWithExtensions(candidate);
+                    if (resolved != null)
+                        return resolved;
+                }
+                catch
+                {
+                    // Skip directories we cannot access
+                }
+            }
+        }
+
+        return null;
     }
 
     // McpServerToolGroup removed; combined into McpServerEntry
@@ -3669,7 +3882,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         if (result is null) return null;
 
         var updated = CloneSettings(baseSettings);
-        updated.Command = result.Command;
+        updated.Command = string.IsNullOrWhiteSpace(result.Command) ? "codex" : result.Command.Trim();
         updated.VerboseLoggingEnabled = result.VerboseLoggingEnabled;
         updated.McpEnabled = result.McpEnabled;
         updated.UseApiKey = result.UseApiKey;
@@ -3680,7 +3893,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         updated.SelectedProfile = result.SelectedProfile ?? string.Empty;
         updated.UseWsl = OperatingSystem.IsWindows() && result.UseWsl;
 
-        ApplyAppSettingsInternal(updated, persist: true, logPrefix: "System: CLI settings updated: ", logSuffix: " (--proto enabled)");
+        ApplyAppSettingsInternal(updated, persist: true, logPrefix: "System: CLI settings updated: ", logSuffix: string.Empty);
         return CloneSettings(_settings);
     }
 

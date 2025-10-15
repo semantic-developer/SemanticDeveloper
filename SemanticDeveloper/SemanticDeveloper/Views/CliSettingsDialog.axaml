@@ -12,6 +12,15 @@
         <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" MaxWidth="550">
             <StackPanel Spacing="10">
             <StackPanel>
+                <TextBlock Text="Codex command" Margin="0,0,0,4"/>
+                <TextBox Text="{Binding Command, Mode=TwoWay}"
+                         Watermark="codex or full path to codex.exe"
+                         MaxWidth="550"/>
+                <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12"
+                           Text="Set to the full path (e.g., C:\Users\myuser\AppData\Roaming\npm\codex) if the CLI is not on PATH."
+                           MaxWidth="550" TextWrapping="Wrap"/>
+            </StackPanel>
+            <StackPanel>
                 <TextBlock Text="Profile" Margin="0,0,0,4"/>
                 <ComboBox ItemsSource="{Binding Profiles}" SelectedItem="{Binding SelectedProfile, Mode=TwoWay}" MaxWidth="550"/>
                 <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="12" Text="Profiles from config.toml (e.g., ~/.codex/config.toml)." MaxWidth="550" TextWrapping="Wrap"/>

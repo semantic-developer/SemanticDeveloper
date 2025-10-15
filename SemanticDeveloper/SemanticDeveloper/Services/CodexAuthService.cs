@@ -10,6 +10,16 @@ public static class CodexAuthService
     {
         try
         {
+            if (WslInterop.IsEnabled)
+            {
+                var wslPath = WslInterop.TryConvertToWindowsPath("~/.codex/auth.json");
+                if (!string.IsNullOrWhiteSpace(wslPath))
+                {
+                    Console.WriteLine($"[CodexAuth] Using WSL auth path {wslPath}.");
+                    return wslPath;
+                }
+            }
+
             var home = Environment.GetEnvironmentVariable("CODEX_HOME");
             string dir;
             if (!string.IsNullOrWhiteSpace(home)) dir = home!;
@@ -27,9 +37,31 @@ public static class CodexAuthService
     {
         try
         {
-            var path = GetAuthJsonPath();
-            if (!File.Exists(path)) return (false, false, null);
-            var text = File.ReadAllText(path);
+            string? text = null;
+            if (WslInterop.IsEnabled)
+            {
+                text = WslInterop.ReadFile("~/.codex/auth.json");
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    var wslPath = WslInterop.TryConvertToWindowsPath("~/.codex/auth.json");
+                    if (!string.IsNullOrWhiteSpace(wslPath) && File.Exists(wslPath))
+                    {
+                        Console.WriteLine($"[CodexAuth] Using converted WSL auth path {wslPath}.");
+                        text = File.ReadAllText(wslPath);
+                    }
+                }
+            }
+            else
+            {
+                var path = GetAuthJsonPath();
+                if (!File.Exists(path)) return (false, false, null);
+                Console.WriteLine($"[CodexAuth] Reading auth from {path}.");
+                text = File.ReadAllText(path);
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+                return (false, false, null);
+
             if (string.IsNullOrWhiteSpace(text)) return (true, false, null);
             var obj = JObject.Parse(text);
 
