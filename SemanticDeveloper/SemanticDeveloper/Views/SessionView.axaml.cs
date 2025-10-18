@@ -89,6 +89,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
     private bool _suppressScrollSync;
     private bool _scrollHandlersAttached;
     private const double EditorButtonsMinWidth = 420.0;
+    private const long ContextBaselineTokens = 12000;
     private bool _verboseLogging;
     private bool _mcpEnabled;
     private bool _allowNetworkAccess;
@@ -97,6 +98,23 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
     private bool _showMcpResultsInLog;
     private bool _showMcpResultsOnlyWhenNoEdits;
     private string _selectedProfile = string.Empty;
+
+    // Cached usage/rate limit data for slash commands
+    private long? _tokenTotal;
+    private long? _tokenInput;
+    private long? _tokenCachedInput;
+    private long? _tokenOutput;
+    private long? _tokenContextWindow;
+    private long? _tokenContextTokens;
+    private int? _tokenPercentRemaining;
+    private long? _tokenLastTotal;
+    private long? _tokenLastInput;
+    private long? _tokenLastCachedInput;
+    private long? _tokenLastOutput;
+    private long? _tokenLastContextTokens;
+    private int? _tokenLastPercentRemaining;
+    private JObject? _lastRateLimits;
+    private string? _lastRateLimitsCapturedAt;
 
     // Per-turn flags
     private bool _turnInProgress;
@@ -175,9 +193,12 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
             IsCliRunning = false;
             SessionStatus = "stopped";
             _appServerInitialized = false;
-            _conversationId = null;
+            SetAssistantStreaming(false);
+            SetTurnInProgress(false);
+            SetConversationId(null);
             _conversationSubscriptionId = null;
             _currentModel = null;
+            ResetTokenTracking();
             foreach (var pending in _pendingRequests.Values)
             {
                 pending.TrySetException(new InvalidOperationException("Codex CLI exited."));
@@ -359,6 +380,247 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         }
     }
 
+    private bool TryHandleSlashCommand(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return false;
+        if (!input.StartsWith("/", StringComparison.Ordinal))
+            return false;
+
+        var commandPart = input.Substring(1);
+        if (string.IsNullOrWhiteSpace(commandPart))
+            return false;
+
+        var end = 0;
+        while (end < commandPart.Length && !char.IsWhiteSpace(commandPart[end]))
+        {
+            end++;
+        }
+        var name = commandPart.Substring(0, end);
+        if (string.IsNullOrWhiteSpace(name))
+            return false;
+
+        // Allow custom prompt commands (/prompts:name) and nested paths to fall back to Codex.
+        if (name.Contains(':') || name.Contains('/'))
+            return false;
+
+        if (string.Equals(name, "mcp", StringComparison.OrdinalIgnoreCase))
+        {
+            HandleMcpSlashCommand();
+            return true;
+        }
+        if (string.Equals(name, "status", StringComparison.OrdinalIgnoreCase))
+        {
+            HandleStatusSlashCommand();
+            return true;
+        }
+
+        return false;
+    }
+
+    private void HandleMcpSlashCommand()
+    {
+        var servers = McpServers.ToList();
+        if (servers.Count == 0)
+        {
+            AppendCliLog("System: No MCP servers configured. Use CLI Settings → MCP to add servers.");
+            return;
+        }
+
+        AppendCliLog($"System: MCP servers ({servers.Count})");
+        foreach (var entry in servers)
+        {
+            var definition = _configuredMcpServers.FirstOrDefault(d => string.Equals(d.Name, entry.Name, StringComparison.OrdinalIgnoreCase));
+            var status = entry.Selected ? "enabled" : "disabled";
+            AppendCliLog($"System: • {entry.Name} ({status})");
+
+            if (definition != null)
+            {
+                if (!string.IsNullOrWhiteSpace(definition.Url))
+                {
+                    AppendCliLog($"System:     transport: http {definition.Url}");
+                }
+                else if (!string.IsNullOrWhiteSpace(definition.Command))
+                {
+                    var args = definition.Args.Count > 0 ? " " + string.Join(" ", definition.Args) : string.Empty;
+                    AppendCliLog($"System:     command: {definition.Command}{args}");
+                }
+            }
+
+            var tools = entry.Tools.Select(t => t.Short).Where(t => !string.IsNullOrWhiteSpace(t)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (tools.Count == 0)
+            {
+                AppendCliLog("System:     tools: (none discovered)");
+            }
+            else
+            {
+                const int MaxToolsToShow = 12;
+                var preview = tools.Take(MaxToolsToShow).ToList();
+                var suffix = tools.Count > MaxToolsToShow ? ", …" : string.Empty;
+                AppendCliLog($"System:     tools: {string.Join(", ", preview)}{suffix}");
+            }
+        }
+    }
+
+    private void HandleStatusSlashCommand()
+    {
+        var profile = string.IsNullOrWhiteSpace(_settings.SelectedProfile) ? "(default)" : _settings.SelectedProfile;
+        var model = string.IsNullOrWhiteSpace(_currentModel) ? "gpt-5-codex" : _currentModel;
+        var workspace = HasWorkspace && !string.IsNullOrWhiteSpace(CurrentWorkspacePath) ? CurrentWorkspacePath! : "(no workspace)";
+        var sandbox = _allowNetworkAccess ? "workspace-write • network=enabled" : "workspace-write • network=disabled";
+        var sessionId = string.IsNullOrWhiteSpace(_conversationId) ? "(not started)" : _conversationId!;
+
+        AppendCliLog("System: Status overview");
+        AppendCliLog($"System: Profile: {profile}");
+        AppendCliLog($"System: Model: {model}");
+        AppendCliLog($"System: Workspace: {workspace}");
+        AppendCliLog($"System: Session: {sessionId}");
+        AppendCliLog($"System: Sandbox: {sandbox}");
+        AppendCliLog("System: Approval policy: on-request");
+
+        if (_tokenTotal.HasValue)
+        {
+            long netInput = Math.Max(0, (_tokenInput ?? 0) - (_tokenCachedInput ?? 0));
+            long cached = _tokenCachedInput ?? 0;
+            long output = _tokenOutput ?? 0;
+            AppendCliLog($"System: Tokens: total {FormatNumber(_tokenTotal.Value)} (input {FormatNumber(netInput)} • cached {FormatNumber(cached)} • output {FormatNumber(output)})");
+        }
+        else
+        {
+            AppendCliLog("System: Tokens: data not available yet.");
+        }
+
+        if (_tokenLastTotal.HasValue && _tokenLastTotal.Value > 0)
+        {
+            long lastNetInput = Math.Max(0, (_tokenLastInput ?? 0) - (_tokenLastCachedInput ?? 0));
+            long lastCached = _tokenLastCachedInput ?? 0;
+            long lastOutput = _tokenLastOutput ?? 0;
+            var components = new List<string> { $"input {FormatNumber(lastNetInput)}" };
+            if (lastCached > 0) components.Add($"cached {FormatNumber(lastCached)}");
+            components.Add($"output {FormatNumber(lastOutput)}");
+            var suffix = _tokenLastPercentRemaining.HasValue ? $" • {_tokenLastPercentRemaining.Value}% context remaining" : string.Empty;
+            AppendCliLog($"System: Last turn: {FormatNumber(_tokenLastTotal.Value)} tokens ({string.Join(" • ", components)}){suffix}");
+        }
+
+        var percentForStatus = _tokenLastPercentRemaining ?? _tokenPercentRemaining;
+        if (_tokenContextWindow.HasValue)
+        {
+            var window = _tokenContextWindow.Value;
+            var usedTokens = _tokenLastContextTokens ?? _tokenContextTokens;
+            if (usedTokens.HasValue)
+            {
+                var clamped = Math.Min(usedTokens.Value, window);
+                var percentText = percentForStatus.HasValue ? $"{percentForStatus.Value}% left" : "usage unknown";
+                AppendCliLog($"System: Context window: {FormatNumber(clamped)} used / {FormatNumber(window)} ({percentText})");
+            }
+            else
+            {
+                AppendCliLog($"System: Context window: {FormatNumber(window)} (usage unavailable)");
+            }
+        }
+        else
+        {
+            AppendCliLog("System: Context window: data not available yet.");
+        }
+
+        RenderRateLimitStatus();
+
+        if (_configuredMcpServers.Count > 0)
+        {
+            var enabledCount = _configuredMcpServers.Count(def =>
+                McpServers.Any(entry => string.Equals(entry.Name, def.Name, StringComparison.OrdinalIgnoreCase) && entry.Selected));
+            var disabledCount = _configuredMcpServers.Count - enabledCount;
+            var parts = new List<string> { $"{enabledCount} enabled" };
+            if (disabledCount > 0) parts.Add($"{disabledCount} disabled");
+            AppendCliLog($"System: MCP servers: {string.Join(", ", parts)}");
+        }
+        else
+        {
+            AppendCliLog("System: MCP servers: none configured");
+        }
+    }
+
+    private void RenderRateLimitStatus()
+    {
+        if (_lastRateLimits is not JObject rl)
+        {
+            AppendCliLog("System: Rate limits: data not available yet.");
+            return;
+        }
+
+        var lines = new List<string>();
+        if (rl["primary"] is JObject primary)
+            lines.Add(DescribeRateLimitWindow(primary, "primary"));
+        if (rl["secondary"] is JObject secondary)
+            lines.Add(DescribeRateLimitWindow(secondary, "secondary"));
+
+        if (lines.Count == 0)
+        {
+            AppendCliLog("System: Rate limits: data not available yet.");
+            return;
+        }
+
+        AppendCliLog("System: Rate limits:");
+        foreach (var line in lines)
+            AppendCliLog($"System:   • {line}");
+
+        var capturedDisplay = FormatResetTimestamp(_lastRateLimitsCapturedAt);
+        if (!string.IsNullOrWhiteSpace(capturedDisplay))
+        {
+            AppendCliLog($"System:   captured at {capturedDisplay}");
+        }
+    }
+
+    private static string DescribeRateLimitWindow(JObject window, string fallbackLabel)
+    {
+        var label = window.Value<long?>("window_minutes") is long minutes
+            ? $"{DescribeLimitDuration(minutes)} limit"
+            : (window.Value<string>("label") ?? $"{fallbackLabel} limit");
+
+        var percent = window.Value<double?>("used_percent")
+            ?? window.Value<double?>("percent_used");
+        var percentText = percent.HasValue ? $"{percent.Value:F0}% used" : "usage unknown";
+
+        var resetsRaw = window["resets_at"]?.ToString() ?? window["resetsAt"]?.ToString();
+        var resetsText = string.IsNullOrWhiteSpace(resetsRaw) ? string.Empty : $" (resets {FormatResetTimestamp(resetsRaw)})";
+
+        return $"{label} — {percentText}{resetsText}";
+    }
+
+    private static string DescribeLimitDuration(long minutes)
+    {
+        const long MinutesPerHour = 60;
+        const long MinutesPerDay = 24 * MinutesPerHour;
+        const long MinutesPerWeek = 7 * MinutesPerDay;
+        const long MinutesPerMonth = 30 * MinutesPerDay;
+        const long Bias = 3;
+
+        if (minutes <= MinutesPerDay + Bias)
+        {
+            var adjusted = Math.Max(1, (minutes + Bias) / MinutesPerHour);
+            return $"{adjusted}h";
+        }
+        if (minutes <= MinutesPerWeek + Bias)
+            return "weekly";
+        if (minutes <= MinutesPerMonth + Bias)
+            return "monthly";
+        return "annual";
+    }
+
+    private static string FormatResetTimestamp(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+        if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var dt))
+        {
+            var local = dt.ToLocalTime();
+            return local.ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        }
+        return value;
+    }
+
+    private static string FormatNumber(long value) => value.ToString("N0", CultureInfo.InvariantCulture);
+
     public bool HasWorkspace => !string.IsNullOrWhiteSpace(CurrentWorkspacePath) && Directory.Exists(CurrentWorkspacePath);
 
     public string ShellPromptPath
@@ -509,6 +771,8 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
 
     public bool IsBusy => _sessionStatus is "thinking…" or "responding…" or "applying patch…" or "starting…" || _assistantStreaming;
 
+    public bool CanInterrupt => _isCliRunning && !string.IsNullOrWhiteSpace(_conversationId) && (_turnInProgress || _assistantStreaming);
+
     public bool IsCliRunning
     {
         get => _isCliRunning;
@@ -518,7 +782,30 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
             _isCliRunning = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(IsBusy));
+            OnPropertyChanged(nameof(CanInterrupt));
         }
+    }
+
+    private void SetAssistantStreaming(bool value)
+    {
+        if (_assistantStreaming == value) return;
+        _assistantStreaming = value;
+        OnPropertyChanged(nameof(IsBusy));
+        OnPropertyChanged(nameof(CanInterrupt));
+    }
+
+    private void SetTurnInProgress(bool value)
+    {
+        if (_turnInProgress == value) return;
+        _turnInProgress = value;
+        OnPropertyChanged(nameof(CanInterrupt));
+    }
+
+    private void SetConversationId(string? value)
+    {
+        if (string.Equals(_conversationId, value, StringComparison.Ordinal)) return;
+        _conversationId = value;
+        OnPropertyChanged(nameof(CanInterrupt));
     }
 
     public string SelectedProfile
@@ -703,7 +990,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                         SetStatusSafe("responding…");
                         if (!_assistantStreaming)
                         {
-                            _assistantStreaming = true;
+                            SetAssistantStreaming(true);
                             if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
                             AppendCliLog("Assistant:");
                         }
@@ -720,7 +1007,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                         {
                             // Already streamed; end with newline and reset
                             if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
-                            _assistantStreaming = false;
+                            SetAssistantStreaming(false);
                             return true;
                         }
                         if (_lastRenderedAgentMessage == message) return true;
@@ -1068,13 +1355,18 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                         _execSuppressed.Remove(callId!);
                         _execCommandById[callId!] = tokens;
                         var joined = string.Join(" ", tokens).ToLowerInvariant();
-                        if (joined.Contains(" sed ") || joined.Contains(" sed -n") || joined.Contains(" ripgrep") || joined.Contains(" rg ") || joined.Contains(" cat ") || joined.Contains(" type "))
+                        if (joined.Contains(" sed ") || joined.Contains(" sed -n") || joined.Contains(" ripgrep") || joined.Contains(" rg ") || joined.Contains(" cat ") || joined.Contains(" type ") || joined.Contains(" nl "))
                         {
                             _execSuppressed.Add(callId!);
                         }
                     }
                     var cmd = tokens.Count == 0 ? string.Empty : string.Join(" ", tokens.Take(5));
-                    if (!string.IsNullOrEmpty(cmd))
+                    var suppressLog = !string.IsNullOrWhiteSpace(callId) && _execSuppressed.Contains(callId!) && !_verboseLogging;
+                    var isShellCommand = tokens.Count >= 2
+                        && string.Equals(tokens[0], "bash", StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(tokens[1], "-lc", StringComparison.OrdinalIgnoreCase);
+                    var shouldLog = _verboseLogging || (!suppressLog && !isShellCommand);
+                    if (!string.IsNullOrEmpty(cmd) && shouldLog)
                     {
                         if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
                         var hasPatch = cmdArr != null && cmdArr.Any(x => (x?.ToString() ?? string.Empty).StartsWith("*** Begin Patch"));
@@ -1086,11 +1378,31 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 {
                     var code = msg? ["exit_code"]?.ToString();
                     var callId = msg? ["call_id"]?.ToString();
-                    if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
-                    if (!string.IsNullOrWhiteSpace(callId) && _execTruncated.Contains(callId!))
-                        AppendCliLog($"System: (exit {code}) — output truncated");
-                    else
-                        AppendCliLog($"System: (exit {code})");
+                    System.Collections.Generic.List<string>? tokens = null;
+                    if (!string.IsNullOrWhiteSpace(callId))
+                    {
+                        _execCommandById.TryGetValue(callId!, out tokens);
+                    }
+                    var suppressLog = !string.IsNullOrWhiteSpace(callId) && _execSuppressed.Contains(callId!) && !_verboseLogging;
+                    var isShellCommand = tokens is { Count: >= 2 }
+                        && string.Equals(tokens[0], "bash", StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(tokens[1], "-lc", StringComparison.OrdinalIgnoreCase);
+                    var isTruncated = !string.IsNullOrWhiteSpace(callId) && _execTruncated.Contains(callId!);
+                    var isSuccessExit = string.Equals(code, "0", StringComparison.OrdinalIgnoreCase);
+                    var shouldLog = _verboseLogging || (!suppressLog && !isShellCommand && (!isSuccessExit || isTruncated));
+                    if (shouldLog)
+                    {
+                        if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
+                        if (!string.IsNullOrWhiteSpace(callId) && _execTruncated.Contains(callId!))
+                            AppendCliLog($"System: (exit {code}) — output truncated");
+                        else
+                            AppendCliLog($"System: (exit {code})");
+                    }
+                    if (!string.IsNullOrWhiteSpace(callId))
+                    {
+                        _execSuppressed.Remove(callId!);
+                        _execCommandById.Remove(callId!);
+                    }
                     return true;
                 }
             case "patch_apply_begin":
@@ -1122,8 +1434,8 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
                 AppendCliLog("System: Turn aborted");
                 SetStatusSafe("idle");
-                _assistantStreaming = false;
-                _turnInProgress = false;
+                SetAssistantStreaming(false);
+                SetTurnInProgress(false);
                 return true;
             case "exec_approval_request":
             case "apply_patch_approval_request":
@@ -1132,7 +1444,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
                 AppendCliLog("System: Task started");
                 SetStatusSafe("thinking…");
-                _turnInProgress = true;
+                SetTurnInProgress(true);
                 _turnSawExec = false;
                 _turnSawPatch = false;
                 return true;
@@ -1140,8 +1452,8 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
                 AppendCliLog("System: Task complete");
                 SetStatusSafe("idle");
-                _assistantStreaming = false;
-                _turnInProgress = false;
+                SetAssistantStreaming(false);
+                SetTurnInProgress(false);
                 return true;
             case "session_configured":
                 // handled elsewhere for model detection; suppress raw JSON
@@ -1188,35 +1500,106 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         long output = total.Value<long?>("output_tokens") ?? 0L;
         long blendedTotal = Math.Max(0, (input - cached)) + output;
 
+        long totalTokensRaw = total.Value<long?>("total_tokens") ?? 0L;
+        long reasoningTokens = total.Value<long?>("reasoning_output_tokens") ?? 0L;
+        long tokensInContext = Math.Max(0, totalTokensRaw - reasoningTokens);
+
         var modelCw = (info["model_context_window"]?.Type == JTokenType.Integer)
             ? info.Value<long?>("model_context_window")
             : null;
+        if (modelCw.HasValue)
+            _tokenContextWindow = modelCw;
 
-        int? percentLeft = null;
-        if (modelCw.HasValue && modelCw.Value > 0)
+        int? aggregatePercent = CalculatePercentRemaining(tokensInContext, _tokenContextWindow);
+
+        _tokenInput = input;
+        _tokenCachedInput = cached;
+        _tokenOutput = output;
+        _tokenTotal = blendedTotal;
+        _tokenContextTokens = tokensInContext;
+        _tokenPercentRemaining = aggregatePercent;
+
+        if (info["last_token_usage"] is JObject last)
         {
-            const long DefaultBaseline = 12000;
-            long window = modelCw.Value;
-            long baseline = Math.Min(DefaultBaseline, Math.Max(0L, window / 4));
-            long effectiveWindow = window - baseline;
-            if (effectiveWindow <= 0)
-            {
-                baseline = 0;
-                effectiveWindow = window;
-            }
+            long lastInput = last.Value<long?>("input_tokens") ?? 0L;
+            long lastCached = last.Value<long?>("cached_input_tokens") ?? 0L;
+            long lastOutput = last.Value<long?>("output_tokens") ?? 0L;
+            long lastTotal = Math.Max(0, (lastInput - lastCached)) + lastOutput;
+            long lastTotalTokensRaw = last.Value<long?>("total_tokens") ?? 0L;
+            long lastReasoningTokens = last.Value<long?>("reasoning_output_tokens") ?? 0L;
+            long lastTokensInContext = Math.Max(0, lastTotalTokensRaw - lastReasoningTokens);
 
-            if (effectiveWindow > 0)
-            {
-                long used = Math.Max(0, blendedTotal - baseline);
-                long remaining = Math.Max(0, effectiveWindow - used);
-                percentLeft = (int)Math.Clamp(remaining * 100.0 / Math.Max(1, effectiveWindow), 0, 100);
-            }
+            _tokenLastInput = lastInput;
+            _tokenLastCachedInput = lastCached;
+            _tokenLastOutput = lastOutput;
+            _tokenLastTotal = lastTotal;
+            _tokenLastContextTokens = lastTokensInContext;
+            _tokenLastPercentRemaining = CalculatePercentRemaining(lastTokensInContext, _tokenContextWindow);
+        }
+        else
+        {
+            _tokenLastInput = null;
+            _tokenLastCachedInput = null;
+            _tokenLastOutput = null;
+            _tokenLastTotal = null;
+            _tokenLastContextTokens = null;
+            _tokenLastPercentRemaining = null;
         }
 
-        string num(long v) => v.ToString("N0", CultureInfo.InvariantCulture);
-        TokenStats = percentLeft.HasValue
-            ? $"tokens {num(blendedTotal)} • {percentLeft.Value}% left"
-            : $"tokens {num(blendedTotal)}";
+        var percentForHeader = _tokenLastPercentRemaining ?? aggregatePercent;
+        TokenStats = percentForHeader.HasValue
+            ? $"tokens {FormatNumber(blendedTotal)} • {percentForHeader.Value}% left"
+            : $"tokens {FormatNumber(blendedTotal)}";
+
+        var rateLimitsToken = msg["rate_limits"];
+        if (rateLimitsToken is JObject rlObj)
+        {
+            _lastRateLimits = (JObject)rlObj.DeepClone();
+            _lastRateLimitsCapturedAt = rlObj.Value<string>("captured_at")
+                ?? msg.Value<string>("captured_at");
+        }
+        else if (rateLimitsToken is JValue jv && jv.Type == JTokenType.Null)
+        {
+            _lastRateLimits = null;
+            _lastRateLimitsCapturedAt = msg.Value<string>("captured_at");
+        }
+    }
+
+    private static int? CalculatePercentRemaining(long tokensInContext, long? modelCw)
+    {
+        if (!modelCw.HasValue) return null;
+        var window = modelCw.Value;
+        if (window <= ContextBaselineTokens) return 0;
+
+        var effectiveWindow = window - ContextBaselineTokens;
+        if (effectiveWindow <= 0) return 0;
+
+        var used = Math.Max(0, tokensInContext - ContextBaselineTokens);
+        var remaining = Math.Max(0, effectiveWindow - used);
+        return (int)Math.Clamp((double)remaining * 100.0 / effectiveWindow, 0, 100);
+    }
+
+    private void ResetTokenTracking()
+    {
+        _tokenTotal = null;
+        _tokenInput = null;
+        _tokenCachedInput = null;
+        _tokenOutput = null;
+        _tokenContextWindow = null;
+        _tokenContextTokens = null;
+        _tokenPercentRemaining = null;
+        _tokenLastTotal = null;
+        _tokenLastInput = null;
+        _tokenLastCachedInput = null;
+        _tokenLastOutput = null;
+        _tokenLastContextTokens = null;
+        _tokenLastPercentRemaining = null;
+        _lastRateLimits = null;
+        _lastRateLimitsCapturedAt = null;
+        if (!string.IsNullOrEmpty(TokenStats))
+        {
+            TokenStats = string.Empty;
+        }
     }
 
     private async Task SelectWorkspaceAsync()
@@ -1542,7 +1925,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
                 var name = Path.GetFileName(file);
                 if (string.IsNullOrWhiteSpace(name)) continue;
                 var display = name.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ? name[..^3] : name;
-                var command = "/" + name;
+                var command = "/prompts:" + display;
                 results.Add(new PromptEntry(display, command, file));
             }
         }
@@ -2369,7 +2752,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
             _pendingRequests.Clear();
             _nextRequestId = 0;
             _appServerInitialized = false;
-            _conversationId = null;
+            SetConversationId(null);
             _conversationSubscriptionId = null;
 
             try
@@ -2438,7 +2821,11 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         var response = await SendRequestAsync("newConversation", conversationParams);
         if (response is JObject obj)
         {
-            _conversationId = obj["conversationId"]?.ToString() ?? _conversationId;
+            var convoId = obj["conversationId"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(convoId))
+            {
+                SetConversationId(convoId);
+            }
             var model = obj["model"]?.ToString();
             if (!string.IsNullOrWhiteSpace(model))
             {
@@ -2539,7 +2926,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         {
             var sessionId = payload["sessionId"]?.ToString();
             if (!string.IsNullOrWhiteSpace(sessionId))
-                _conversationId = sessionId;
+                SetConversationId(sessionId);
 
             var model = payload["model"]?.ToString();
             if (!string.IsNullOrWhiteSpace(model))
@@ -2714,6 +3101,32 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         }
     }
 
+    private async Task InterruptTurnAsync()
+    {
+        if (!_cli.IsRunning) return;
+        if (!_turnInProgress && !_assistantStreaming) return;
+        if (string.IsNullOrWhiteSpace(_conversationId))
+        {
+            AppendCliLog("System: No active conversation to interrupt.");
+            return;
+        }
+
+        try
+        {
+            await SendRequestAsync(
+                "interruptConversation",
+                new JObject { ["conversationId"] = _conversationId }
+            );
+            if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
+            AppendCliLog("System: Interrupt requested.");
+        }
+        catch (Exception ex)
+        {
+            if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
+            AppendCliLog("System: Failed to send interrupt: " + ex.Message);
+        }
+    }
+
     private async Task InterruptCliAsync()
     {
         if (!_cli.IsRunning) return;
@@ -2733,11 +3146,15 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         finally
         {
             try { _cli.Stop(); } catch { }
+            SetAssistantStreaming(false);
+            SetTurnInProgress(false);
             IsCliRunning = false;
             SessionStatus = "stopped";
-            _conversationId = null;
+            SetConversationId(null);
             _conversationSubscriptionId = null;
+            _currentModel = null;
             _appServerInitialized = false;
+            ResetTokenTracking();
         }
     }
 
@@ -3786,7 +4203,7 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         => await RestartCliAsync();
 
     private async void OnStopCliClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-        => await InterruptCliAsync();
+        => await InterruptTurnAsync();
 
     private void OnClearLogClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
@@ -3822,9 +4239,13 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
         try { _cli.Stop(); } catch { }
         IsCliRunning = false;
         SessionStatus = "stopped";
-        _conversationId = null;
+        SetAssistantStreaming(false);
+        SetTurnInProgress(false);
+        SetConversationId(null);
         _conversationSubscriptionId = null;
+        _currentModel = null;
         _appServerInitialized = false;
+        ResetTokenTracking();
     }
 
     private void OnOpenInFileManagerClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -5117,10 +5538,17 @@ public partial class SessionView : UserControl, INotifyPropertyChanged
 
         var line = CliInput;
         CliInput = string.Empty;
-        _pendingUserInput = line;
         if (!CliLog.EndsWith("\n")) AppendCliInline(Environment.NewLine);
         AppendCliLog("You:");
         AppendCliLog(line);
+
+        var trimmed = line.Trim();
+        if (TryHandleSlashCommand(trimmed))
+        {
+            return;
+        }
+
+        _pendingUserInput = line;
 
         try
         {
